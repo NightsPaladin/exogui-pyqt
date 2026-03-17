@@ -1,5 +1,8 @@
 # eXoGUI
 
+> **Unofficial** — This is a community project and is not affiliated with, endorsed by,
+> or supported by the eXoDOS project or the retro-exo.com team.
+
 A Python/PyQt6 GUI launcher for the [eXoDOS](https://www.retro-exo.com/) MS-DOS game collection and the eXoWin3x Windows 3.x collection.  
 Works on **macOS** and **Linux**.
 
