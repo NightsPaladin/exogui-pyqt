@@ -1,0 +1,16 @@
+{
+  "name": "One Dark",
+  "bg_window": "#1e2127",
+  "bg_panel": "#282c34",
+  "bg_card": "#2c313c",
+  "bg_input": "#2c313c",
+  "bg_status": "#1a1d23",
+  "border": "#3e4451",
+  "handle": "#3e4451",
+  "accent": "#61afef",
+  "text_hi": "#abb2bf",
+  "text_med": "#828997",
+  "text_lo": "#4b5263",
+  "green": "#98c379",
+  "orange": "#e5c07b"
+}

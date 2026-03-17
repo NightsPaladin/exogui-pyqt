@@ -1,0 +1,16 @@
+{
+  "name": "Ayu Dark",
+  "bg_window": "#0d1017",
+  "bg_panel": "#13191f",
+  "bg_card": "#1a2029",
+  "bg_input": "#1a2029",
+  "bg_status": "#0a0d12",
+  "border": "#253340",
+  "handle": "#253340",
+  "accent": "#ffb454",
+  "text_hi": "#cccac2",
+  "text_med": "#707a8c",
+  "text_lo": "#3d4751",
+  "green": "#aad94c",
+  "orange": "#ff8f40"
+}

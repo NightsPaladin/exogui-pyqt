@@ -1,0 +1,16 @@
+{
+  "name": "Monokai",
+  "bg_window": "#272822",
+  "bg_panel": "#2d2e27",
+  "bg_card": "#3a3b32",
+  "bg_input": "#3a3b32",
+  "bg_status": "#1e1f1a",
+  "border": "#49483e",
+  "handle": "#49483e",
+  "accent": "#f92672",
+  "text_hi": "#f8f8f2",
+  "text_med": "#a59f85",
+  "text_lo": "#75715e",
+  "green": "#a6e22e",
+  "orange": "#fd971f"
+}

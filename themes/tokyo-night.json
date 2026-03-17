@@ -1,0 +1,16 @@
+{
+  "name": "Tokyo Night",
+  "bg_window": "#1a1b26",
+  "bg_panel": "#1f2335",
+  "bg_card": "#24283b",
+  "bg_input": "#292e42",
+  "bg_status": "#16161e",
+  "border": "#3b4261",
+  "handle": "#3b4261",
+  "accent": "#bb9af7",
+  "text_hi": "#c0caf5",
+  "text_med": "#9aa5ce",
+  "text_lo": "#565f89",
+  "green": "#9ece6a",
+  "orange": "#ff9e64"
+}

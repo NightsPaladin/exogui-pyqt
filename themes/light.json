@@ -1,0 +1,16 @@
+{
+  "name": "Light",
+  "bg_window": "#f0f0f5",
+  "bg_panel": "#ffffff",
+  "bg_card": "#eaeaf2",
+  "bg_input": "#ffffff",
+  "bg_status": "#dcdce8",
+  "border": "#cccccc",
+  "handle": "#ccccdd",
+  "accent": "#4a90d9",
+  "text_hi": "#1a1a2a",
+  "text_med": "#555566",
+  "text_lo": "#888899",
+  "green": "#2e7d32",
+  "orange": "#c45200"
+}

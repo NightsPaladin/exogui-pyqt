@@ -1,0 +1,16 @@
+{
+  "name": "Cyberpunk",
+  "bg_window": "#0d0d1a",
+  "bg_panel": "#13132a",
+  "bg_card": "#1a1a38",
+  "bg_input": "#1a1a38",
+  "bg_status": "#08081a",
+  "border": "#30305a",
+  "handle": "#30305a",
+  "accent": "#ff2a6d",
+  "text_hi": "#d1f7ff",
+  "text_med": "#9b8ccc",
+  "text_lo": "#504580",
+  "green": "#05d9e8",
+  "orange": "#ff9900"
+}

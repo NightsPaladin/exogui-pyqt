@@ -1,0 +1,16 @@
+{
+  "name": "Ocean",
+  "bg_window": "#0a1628",
+  "bg_panel": "#0d1f3c",
+  "bg_card": "#112545",
+  "bg_input": "#112545",
+  "bg_status": "#060e1c",
+  "border": "#1e3a5f",
+  "handle": "#1e3a5f",
+  "accent": "#4fc3f7",
+  "text_hi": "#cce7ff",
+  "text_med": "#80b4d4",
+  "text_lo": "#3a6a8a",
+  "green": "#00e5ff",
+  "orange": "#ff8a65"
+}

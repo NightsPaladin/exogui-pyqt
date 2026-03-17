@@ -1,0 +1,16 @@
+{
+  "name": "Gruvbox",
+  "bg_window": "#1d2021",
+  "bg_panel": "#282828",
+  "bg_card": "#3c3836",
+  "bg_input": "#32302f",
+  "bg_status": "#1d2021",
+  "border": "#504945",
+  "handle": "#504945",
+  "accent": "#d79921",
+  "text_hi": "#ebdbb2",
+  "text_med": "#a89984",
+  "text_lo": "#665c54",
+  "green": "#98971a",
+  "orange": "#d65d0e"
+}

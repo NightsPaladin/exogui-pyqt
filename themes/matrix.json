@@ -1,0 +1,16 @@
+{
+  "name": "Matrix",
+  "bg_window": "#000000",
+  "bg_panel": "#0a0f0a",
+  "bg_card": "#0f1a0f",
+  "bg_input": "#0f1a0f",
+  "bg_status": "#000000",
+  "border": "#1a3a1a",
+  "handle": "#1a3a1a",
+  "accent": "#00ff41",
+  "text_hi": "#00ff41",
+  "text_med": "#00aa2b",
+  "text_lo": "#005515",
+  "green": "#00ff41",
+  "orange": "#39ff14"
+}

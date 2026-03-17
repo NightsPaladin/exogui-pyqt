@@ -1,0 +1,16 @@
+{
+  "name": "Solarized Light",
+  "bg_window": "#fdf6e3",
+  "bg_panel": "#eee8d5",
+  "bg_card": "#e4dfc8",
+  "bg_input": "#eee8d5",
+  "bg_status": "#ddd8c4",
+  "border": "#93a1a1",
+  "handle": "#b0b8b0",
+  "accent": "#268bd2",
+  "text_hi": "#073642",
+  "text_med": "#586e75",
+  "text_lo": "#93a1a1",
+  "green": "#859900",
+  "orange": "#cb4b16"
+}

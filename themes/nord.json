@@ -1,0 +1,16 @@
+{
+  "name": "Nord",
+  "bg_window": "#2e3440",
+  "bg_panel": "#3b4252",
+  "bg_card": "#434c5e",
+  "bg_input": "#3b4252",
+  "bg_status": "#272c36",
+  "border": "#4c566a",
+  "handle": "#4c566a",
+  "accent": "#88c0d0",
+  "text_hi": "#eceff4",
+  "text_med": "#d8dee9",
+  "text_lo": "#4c566a",
+  "green": "#a3be8c",
+  "orange": "#d08770"
+}

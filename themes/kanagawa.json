@@ -1,0 +1,16 @@
+{
+  "name": "Kanagawa",
+  "bg_window": "#1f1f28",
+  "bg_panel": "#16161d",
+  "bg_card": "#2a2a37",
+  "bg_input": "#2a2a37",
+  "bg_status": "#0d0c0c",
+  "border": "#363646",
+  "handle": "#363646",
+  "accent": "#e6c384",
+  "text_hi": "#dcd7ba",
+  "text_med": "#9cabca",
+  "text_lo": "#54546d",
+  "green": "#76946a",
+  "orange": "#ffa066"
+}

@@ -1,0 +1,16 @@
+{
+  "name": "Dracula",
+  "bg_window": "#1e1f29",
+  "bg_panel": "#282a36",
+  "bg_card": "#44475a",
+  "bg_input": "#383a4a",
+  "bg_status": "#1a1b24",
+  "border": "#6272a4",
+  "handle": "#44475a",
+  "accent": "#bd93f9",
+  "text_hi": "#f8f8f2",
+  "text_med": "#a0a8c0",
+  "text_lo": "#6272a4",
+  "green": "#50fa7b",
+  "orange": "#ffb86c"
+}

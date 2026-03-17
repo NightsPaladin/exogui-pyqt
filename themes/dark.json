@@ -1,0 +1,16 @@
+{
+  "name": "Dark",
+  "bg_window": "#1c1c1e",
+  "bg_panel": "#252523",
+  "bg_card": "#323230",
+  "bg_input": "#2c2c2a",
+  "bg_status": "#141412",
+  "border": "#48484a",
+  "handle": "#3a3a38",
+  "accent": "#4a90d9",
+  "text_hi": "#f2f2f0",
+  "text_med": "#8e8e8a",
+  "text_lo": "#636360",
+  "green": "#30d158",
+  "orange": "#ff9f0a"
+}

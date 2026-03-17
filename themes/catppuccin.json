@@ -1,0 +1,16 @@
+{
+  "name": "Catppuccin",
+  "bg_window": "#1e1e2e",
+  "bg_panel": "#181825",
+  "bg_card": "#313244",
+  "bg_input": "#313244",
+  "bg_status": "#11111b",
+  "border": "#45475a",
+  "handle": "#45475a",
+  "accent": "#89b4fa",
+  "text_hi": "#cdd6f4",
+  "text_med": "#a6adc8",
+  "text_lo": "#6c7086",
+  "green": "#a6e3a1",
+  "orange": "#fab387"
+}

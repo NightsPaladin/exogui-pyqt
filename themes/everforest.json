@@ -1,0 +1,16 @@
+{
+  "name": "Everforest",
+  "bg_window": "#232a2e",
+  "bg_panel": "#2d353b",
+  "bg_card": "#343f44",
+  "bg_input": "#3d484d",
+  "bg_status": "#1e2326",
+  "border": "#475258",
+  "handle": "#3d484d",
+  "accent": "#a7c080",
+  "text_hi": "#d3c6aa",
+  "text_med": "#859289",
+  "text_lo": "#475258",
+  "green": "#a7c080",
+  "orange": "#e69875"
+}
