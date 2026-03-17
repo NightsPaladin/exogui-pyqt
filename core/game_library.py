@@ -373,6 +373,12 @@ class GameLibrary:
             root_folder_unix = game.root_folder.replace("\\", "/")
             game.game_dir = root_folder_unix.split("/")[-1] if root_folder_unix else ""
 
+            # Skip utility/admin entries that point outside the project tree
+            # (e.g. the "Setup eXoDOS" shortcut entry whose RootFolder is "..").
+            # All real games have root_folder starting with "eXo/".
+            if root_folder_unix.startswith(".."):
+                continue
+
             # Emulator from map; fall back to project default
             game.emulator = self._emulator_map.get(
                 title.lower(), self._config.default_emulator
