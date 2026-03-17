@@ -83,12 +83,20 @@ Open **File → Settings** and configure each collection:
 
 You can add multiple projects (eXoDOS + eXoWin3x simultaneously) using the **+ Add** button.
 
+![Settings](exogui-settings.png)
+
 ### Views
 
 Click the **≡ / ⊞ / ☰** buttons at the top of the game list to switch between:
 - **≡ List** — compact rows with box art thumbnail, title, year, and genre
 - **⊞ Grid** — box-art cover grid
 - **☰ Table** — sortable columns (Title, Year, Developer, Publisher, Genre)
+
+![List view](exogui-list.png)
+
+![Grid view](exogui-grid.png)
+
+![Table view](exogui-table.png)
 
 ### Lite Mode (download on demand)
 
