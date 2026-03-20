@@ -9,7 +9,7 @@ from typing import Optional
 
 from PyQt6.QtCore import (
     Qt, QSortFilterProxyModel, QModelIndex, pyqtSignal,
-    QAbstractTableModel, QVariant, QSize, QRect, QItemSelectionModel,
+    QAbstractTableModel, QVariant, QSize, QRect, QItemSelectionModel, QTimer,
 )
 from PyQt6.QtGui import QPixmap, QIcon, QColor, QPainter, QFont, QPalette, QPen
 from PyQt6.QtWidgets import (
@@ -157,6 +157,12 @@ class GameItemDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._cache = image_cache
         self._placeholder = self._make_placeholder(fallback_path)
+        # Pre-create fonts once to avoid per-paint allocation
+        self._title_font = QFont()
+        self._title_font.setPointSize(11)
+        self._title_font.setBold(True)
+        self._meta_font = QFont()
+        self._meta_font.setPointSize(9)
 
     def _make_placeholder(self, fallback_path: str) -> QPixmap:
         pm = QPixmap(fallback_path)
@@ -195,9 +201,7 @@ class GameItemDelegate(QStyledItemDelegate):
         thumb_rect.setWidth(THUMB_W)
         thumb_rect.setHeight(THUMB_H)
 
-        box_front = game.image_paths.get("box_front")
-        shots = game.image_paths.get("screenshots", [])
-        cover_path = box_front or (shots[0] if shots else None)
+        cover_path = game.primary_cover_path or None
         pm = None
         if cover_path:
             pm = self._cache.get(
@@ -215,10 +219,7 @@ class GameItemDelegate(QStyledItemDelegate):
         fg_primary   = pal.color(G.Active, R.HighlightedText) if is_sel else pal.color(G.Normal, R.Text)
         fg_secondary = pal.color(G.Normal, R.PlaceholderText)
 
-        title_font = QFont()
-        title_font.setPointSize(11)
-        title_font.setBold(True)
-        painter.setFont(title_font)
+        painter.setFont(self._title_font)
         painter.setPen(fg_primary)
         painter.drawText(text_x, text_top, text_w, 20,
                          Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
@@ -226,17 +227,13 @@ class GameItemDelegate(QStyledItemDelegate):
 
         # Warning indicator for games with limited platform support
         if game.compat_note:
-            warn_font = QFont()
-            warn_font.setPointSize(9)
-            painter.setFont(warn_font)
+            painter.setFont(self._meta_font)
             painter.setPen(QColor("#ffcc44"))
             painter.drawText(text_x, text_top + 20, text_w, 14,
                              Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter,
                              "⚠ Limited platform support")
 
-        meta_font = QFont()
-        meta_font.setPointSize(9)
-        painter.setFont(meta_font)
+        painter.setFont(self._meta_font)
         painter.setPen(fg_secondary)
         meta = " · ".join(filter(None, [game.display_year, game.first_genre]))
         meta_offset = 36 if game.compat_note else 22
@@ -308,6 +305,8 @@ class GridItemDelegate(QStyledItemDelegate):
         super().__init__(parent)
         self._cache = image_cache
         self._placeholder = self._make_placeholder(fallback_path)
+        self._title_font = QFont()
+        self._title_font.setPointSize(11)
 
     def _make_placeholder(self, fallback_path: str) -> QPixmap:
         pm = QPixmap(fallback_path)
@@ -341,9 +340,7 @@ class GridItemDelegate(QStyledItemDelegate):
         img_area = QRect(rect.left() + 2, rect.top() + GRID_TOP_PAD,
                          rect.width() - 4, GRID_IMG_H)
 
-        box_front = game.image_paths.get("box_front")
-        shots = game.image_paths.get("screenshots", [])
-        cover_path = box_front or (shots[0] if shots else None)
+        cover_path = game.primary_cover_path or None
         pm = None
         if cover_path:
             pm = self._cache.get(
@@ -374,9 +371,7 @@ class GridItemDelegate(QStyledItemDelegate):
                            GRID_TITLE_H - 2)
         title_bg = QColor(0, 0, 0, 160) if not is_sel else QColor(0, 0, 0, 70)
         painter.fillRect(title_rect, title_bg)
-        title_font = QFont()
-        title_font.setPointSize(11)
-        painter.setFont(title_font)
+        painter.setFont(self._title_font)
         painter.setPen(QColor(255, 255, 255, 230))
         painter.drawText(title_rect,
                          Qt.AlignmentFlag.AlignHCenter
@@ -385,7 +380,8 @@ class GridItemDelegate(QStyledItemDelegate):
                          game.title)
 
         # ── Border — drawn last so it always sits on top of all content ──────
-        border_color = QColor(themes.current().accent if is_sel else themes.current().border)
+        t = themes.current()
+        border_color = QColor(t.accent if is_sel else t.border)
         pen = QPen(border_color)
         pen.setWidth(1)
         painter.setPen(pen)
@@ -395,7 +391,7 @@ class GridItemDelegate(QStyledItemDelegate):
         # ── Installed dot (top-right, inside the header pad) ─────────────────
         dot_color = INSTALLED_DOT if game.installed else NOT_INSTALLED_DOT
         painter.setBrush(dot_color)
-        painter.setPen(QPen(QColor(themes.current().bg_panel), 1.5))
+        painter.setPen(QPen(QColor(t.bg_panel), 1.5))
         painter.drawEllipse(rect.right() - 13, rect.top() + 5, 8, 8)
 
         painter.restore()
@@ -463,8 +459,14 @@ class GameFilterProxyModel(QSortFilterProxyModel):
             elif self._preset_field == "source":
                 if game.source != self._preset_value:
                     return False
-        # Text filter from parent
-        return super().filterAcceptsRow(source_row, source_parent)
+        # Text filter from parent (covers Title, Year, Dev, Pub, Genre columns)
+        if not super().filterAcceptsRow(source_row, source_parent):
+            # Also check series, which is not a display column
+            rx = self.filterRegularExpression()
+            if rx.pattern():
+                return bool(rx.match(game.series).hasMatch())
+            return False
+        return True
 
 
 # ── panel widget ─────────────────────────────────────────────────────────────
@@ -489,6 +491,7 @@ class GameListPanel(QWidget):
         self._proxy_model.setSourceModel(self._source_model)
         self._proxy_model.setFilterRole(Qt.ItemDataRole.DisplayRole)
         self._proxy_model.setFilterCaseSensitivity(Qt.CaseSensitivity.CaseInsensitive)
+        self._proxy_model.setFilterKeyColumn(-1)  # search all columns (title, year, dev, pub, genre)
 
         self._build_ui()
         self._populate()
@@ -502,6 +505,12 @@ class GameListPanel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(3)
+
+        # Debounce timer: apply search filter 150 ms after the user stops typing
+        self._search_timer = QTimer(self)
+        self._search_timer.setSingleShot(True)
+        self._search_timer.setInterval(150)
+        self._search_timer.timeout.connect(self._apply_search_filter)
 
         # Search bar + view mode buttons
         search_row = QHBoxLayout()
@@ -802,7 +811,10 @@ class GameListPanel(QWidget):
     # ── slots ─────────────────────────────────────────────────────────────────
 
     def _on_search(self, text: str) -> None:
-        self._proxy_model.setFilterFixedString(text)
+        self._search_timer.start()  # restart — fires 150 ms after typing stops
+
+    def _apply_search_filter(self) -> None:
+        self._proxy_model.setFilterFixedString(self._search.text())
         self._update_count()
 
     def _on_preset_filter(self, name: str) -> None:

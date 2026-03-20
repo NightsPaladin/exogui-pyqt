@@ -36,6 +36,12 @@ class ProjectConfig:
     image_subdir : str
         Path relative to collection root where per-game artwork lives,
         e.g. ``"Images/MS-DOS"``.
+    music_subdir : str
+        Path relative to collection root where per-game music lives,
+        e.g. ``"Music/MS-DOS"``. May be empty if the collection has no music set.
+    video_subdir : str
+        Path relative to collection root where per-game videos live,
+        e.g. ``"Videos/MS-DOS"``. May be empty if the collection has no video set.
     game_data_subdir : str
         Path relative to collection root where game ZIPs are extracted,
         e.g. ``"eXo/eXoDOS"``.
@@ -55,6 +61,8 @@ class ProjectConfig:
     platform_tag: str
     xml_variants: dict          # mode → relative path from collection root
     image_subdir: str           # e.g. "Images/MS-DOS"
+    music_subdir: str           # e.g. "Music/MS-DOS"
+    video_subdir: str           # e.g. "Videos/MS-DOS"
     game_data_subdir: str       # e.g. "eXo/eXoDOS"
     scripts_subdir: str         # e.g. "eXo/eXoDOS/!dos"
     default_emulator: str       # fallback when emulator map has no entry
@@ -68,6 +76,16 @@ class ProjectConfig:
 
     def abs_image_base(self, root: str) -> str:
         return os.path.join(root, *self.image_subdir.split("/"))
+
+    def abs_music_base(self, root: str) -> str:
+        if not self.music_subdir:
+            return ""
+        return os.path.join(root, *self.music_subdir.split("/"))
+
+    def abs_video_base(self, root: str) -> str:
+        if not self.video_subdir:
+            return ""
+        return os.path.join(root, *self.video_subdir.split("/"))
 
     def abs_game_data(self, root: str) -> str:
         return os.path.join(root, *self.game_data_subdir.split("/"))
@@ -101,6 +119,8 @@ EXODOS = ProjectConfig(
         "kidsafe": "xml/kidsafe/MS-DOS.xml",
     },
     image_subdir="Images/MS-DOS",
+    music_subdir="Music/MS-DOS",
+    video_subdir="Videos/MS-DOS",
     game_data_subdir="eXo/eXoDOS",
     scripts_subdir="eXo/eXoDOS/!dos",
     default_emulator="dosbox-staging",
@@ -118,6 +138,8 @@ EXOWIN3X = ProjectConfig(
         "family": "xml/WinFAMILY.xml",
     },
     image_subdir="Images/Windows 3x",
+    music_subdir="Music/Windows 3x",
+    video_subdir="Videos/Windows 3x",
     game_data_subdir="eXo/eXoWin3x",
     scripts_subdir="eXo/eXoWin3x/!win3x",
     default_emulator="dosbox-staging",  # ECE not available on macOS/Linux; staging is the fallback

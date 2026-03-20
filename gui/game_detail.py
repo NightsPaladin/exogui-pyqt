@@ -1,6 +1,6 @@
 """
-game_detail.py — Right-side detail panel: box art, metadata, screenshots carousel,
-                  videos, and documents.
+game_detail.py — Right-side detail panel: box art, metadata, media gallery,
+                  videos, music, and documents.
 """
 
 from __future__ import annotations
@@ -174,7 +174,7 @@ class ScreenshotCarousel(QWidget):
                 self._thumb_layout.removeItem(item)
 
         if not paths:
-            self._main_label.setText("No screenshots available")
+            self._main_label.setText("No images available")
             t = themes.current()
             self._main_label.setStyleSheet(
                 f"background:{t.bg_window}; color:{t.text_lo}; font-size:12px; border-radius:6px;"
@@ -242,7 +242,7 @@ class GameDetailPanel(QWidget):
       - Box art (large)
       - Title + metadata grid
       - Description
-      - Screenshots carousel
+      - Media gallery
       - Play / Install buttons
     """
 
@@ -319,6 +319,11 @@ class GameDetailPanel(QWidget):
 
         self._dev_pub_label = _label("", t.text_med, 12)
         meta_col.addWidget(self._dev_pub_label)
+
+        # Extra metadata: ESRB rating, series, play mode, max players
+        self._extra_meta_label = _label("", t.text_lo, 11)
+        self._extra_meta_label.hide()
+        meta_col.addWidget(self._extra_meta_label)
 
         # Rating + emulator badges
         badge_row = QHBoxLayout()
@@ -407,34 +412,25 @@ class GameDetailPanel(QWidget):
 
         root.addWidget(desc_wrap)
 
-        # ── screenshots ───────────────────────────────────────────────────
-        scr_wrap = QWidget()
-        scr_inner = QVBoxLayout(scr_wrap)
-        scr_inner.setContentsMargins(12, 8, 12, 8)
+        # ── media ─────────────────────────────────────────────────────────
+        self._media_wrap = QWidget()
+        media_inner = QVBoxLayout(self._media_wrap)
+        media_inner.setContentsMargins(12, 8, 12, 12)
+        media_inner.setSpacing(6)
 
-        scr_hdr = _label("Screenshots", t.text_med, 11, bold=True)
-        scr_inner.addWidget(scr_hdr)
+        media_hdr = _label("Media", t.text_med, 11, bold=True)
+        media_inner.addWidget(media_hdr)
+
+        self._images_wrap = QWidget()
+        images_v = QVBoxLayout(self._images_wrap)
+        images_v.setContentsMargins(0, 0, 0, 0)
+        images_v.setSpacing(2)
+        images_v.addWidget(_label("🖼  Images", t.text_lo, 10, bold=True))
 
         self._carousel = ScreenshotCarousel()
         self._carousel.setMinimumHeight(300)
-        scr_inner.addWidget(self._carousel)
-
-        root.addWidget(scr_wrap)
-
-        # ── extras (videos + documents) ───────────────────────────────────
-        self._extras_wrap = QWidget()
-        self._extras_wrap.hide()
-        extras_inner = QVBoxLayout(self._extras_wrap)
-        extras_inner.setContentsMargins(12, 4, 12, 12)
-        extras_inner.setSpacing(6)
-
-        sep2 = QFrame()
-        sep2.setFrameShape(QFrame.Shape.HLine)
-        sep2.setStyleSheet(f"color:{t.border};")
-        extras_inner.addWidget(sep2)
-
-        extras_hdr = _label("Videos & Documents", t.text_med, 11, bold=True)
-        extras_inner.addWidget(extras_hdr)
+        images_v.addWidget(self._carousel)
+        media_inner.addWidget(self._images_wrap)
 
         # ── Videos: horizontal flow (wraps to next line) ──────────────────
         self._videos_wrap = QWidget()
@@ -448,7 +444,24 @@ class GameDetailPanel(QWidget):
         self._videos_container.setStyleSheet("background:transparent;")
         self._videos_flow = FlowLayout(self._videos_container, h_spacing=6, v_spacing=4)
         videos_v.addWidget(self._videos_container)
-        extras_inner.addWidget(self._videos_wrap)
+        media_inner.addWidget(self._videos_wrap)
+
+        # ── Music: vertical full-width list ───────────────────────────────
+        self._music_wrap = QWidget()
+        self._music_wrap.hide()
+        music_v = QVBoxLayout(self._music_wrap)
+        music_v.setContentsMargins(0, 0, 0, 0)
+        music_v.setSpacing(2)
+        music_v.addWidget(_label("♪  Music", t.text_lo, 10, bold=True))
+
+        self._music_container = QWidget()
+        self._music_container.setStyleSheet("background:transparent;")
+        self._music_list = QVBoxLayout(self._music_container)
+        self._music_list.setContentsMargins(0, 0, 4, 0)
+        self._music_list.setSpacing(3)
+        self._music_list.addStretch()
+        music_v.addWidget(self._music_container)
+        media_inner.addWidget(self._music_wrap)
 
         # ── Documents: vertical full-width list ───────────────────────────
         self._docs_wrap = QWidget()
@@ -463,10 +476,11 @@ class GameDetailPanel(QWidget):
         self._docs_list = QVBoxLayout(self._docs_container)
         self._docs_list.setContentsMargins(0, 0, 4, 0)
         self._docs_list.setSpacing(3)
+        self._docs_list.addStretch()
         docs_v.addWidget(self._docs_container)
-        extras_inner.addWidget(self._docs_wrap)
+        media_inner.addWidget(self._docs_wrap)
 
-        root.addWidget(self._extras_wrap)
+        root.addWidget(self._media_wrap)
 
         root.addStretch()   # push all content toward the top
 
@@ -498,6 +512,23 @@ class GameDetailPanel(QWidget):
         if game.publisher and game.publisher != game.developer:
             dev_pub_parts.append(f"Pub: {game.publisher}")
         self._dev_pub_label.setText("  ·  ".join(dev_pub_parts))
+
+        # Extra metadata: ESRB, series, play mode, max players
+        extra_parts = []
+        if game.rating:
+            extra_parts.append(f"ESRB: {game.rating}")
+        if game.series:
+            extra_parts.append(f"Series: {game.series}")
+        play_modes = [m.strip() for m in game.play_mode.split(";") if m.strip()]
+        if play_modes:
+            extra_parts.append(" / ".join(play_modes))
+        if game.max_players > 1:
+            extra_parts.append(f"Max: {game.max_players} players")
+        if extra_parts:
+            self._extra_meta_label.setText("  ·  ".join(extra_parts))
+            self._extra_meta_label.show()
+        else:
+            self._extra_meta_label.hide()
 
         if game.community_rating:
             stars = "★" * round(game.community_rating) + "☆" * (5 - round(game.community_rating))
@@ -544,10 +575,9 @@ class GameDetailPanel(QWidget):
         else:
             self._warning_banner.hide()
 
-        # Box art — fall back to first screenshot, then eXoDOS icon if nothing available
-        box_path = game.image_paths.get("box_front")
-        shots = game.image_paths.get("screenshots", [])
-        cover_path = box_path or (shots[0] if shots else None)
+        # Box art — fall back to best available cover art, then eXoDOS icon if nothing available
+        gallery = game.image_paths.get("gallery", [])
+        cover_path = game.primary_cover_path or None
         if cover_path:
             self._set_box_art_fallback()  # show icon immediately; replaced on load
             self._cache.get(cover_path,
@@ -559,17 +589,22 @@ class GameDetailPanel(QWidget):
         # Description
         self._desc_text.setPlainText(game.notes or "No description available.")
 
-        # Screenshots
-        self._carousel.set_screenshots(shots, self._cache)
+        # Media gallery
+        self._carousel.set_screenshots(gallery, self._cache)
 
-        # Extras (videos + documents)
-        self._populate_extras(game.extras)
+        # Collection media + Extras
+        self._populate_media(game.extras)
 
-    def _populate_extras(self, extras: list) -> None:
-        """Rebuild Videos (flow chips) and Documents (vertical list) from the game's extras."""
+    def _populate_media(self, extras: list) -> None:
+        """Rebuild Media subsections from collection media files and the game's Extras/ folder."""
         # Clear video flow
         while self._videos_flow.count():
             item = self._videos_flow.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        while self._music_list.count() > 1:
+            item = self._music_list.takeAt(0)
             if item and item.widget():
                 item.widget().deleteLater()
 
@@ -580,19 +615,27 @@ class GameDetailPanel(QWidget):
                 item.widget().deleteLater()
 
         videos = [e for e in extras if e.kind == "video"]
-        docs   = [e for e in extras if e.kind in ("pdf", "document", "audio", "image")]
+        music  = [e for e in extras if e.kind == "audio"]
+        docs   = [e for e in extras if e.kind in ("pdf", "document", "image")]
 
         for extra in videos:
             self._videos_flow.addWidget(VideoCard(extra, self._cache))
+
+        for extra in music:
+            self._music_list.insertWidget(
+                self._music_list.count() - 1, self._make_doc_row(extra)
+            )
 
         for extra in docs:
             self._docs_list.insertWidget(
                 self._docs_list.count() - 1, self._make_doc_row(extra)
             )
 
+        self._images_wrap.setVisible(bool(self._game and self._game.image_paths.get("gallery")))
         self._videos_wrap.setVisible(bool(videos))
+        self._music_wrap.setVisible(bool(music))
         self._docs_wrap.setVisible(bool(docs))
-        self._extras_wrap.setVisible(bool(videos or docs))
+        self._media_wrap.setVisible(bool(self._game and self._game.image_paths.get("gallery")) or bool(videos or music or docs))
 
     def _make_doc_row(self, extra: Extra) -> QWidget:
         """Full-width row with icon+name on the left and an Open button on the right."""
@@ -648,8 +691,10 @@ class GameDetailPanel(QWidget):
         self._desc_text.setPlainText("")
         self._box_art.setText("")
         self._carousel.set_screenshots([], self._cache)
-        self._extras_wrap.hide()
+        self._media_wrap.hide()
+        self._images_wrap.show()
         self._videos_wrap.hide()
+        self._music_wrap.hide()
         self._docs_wrap.hide()
 
     # ── slots ─────────────────────────────────────────────────────────────────

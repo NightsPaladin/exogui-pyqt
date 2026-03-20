@@ -13,7 +13,7 @@ Works on **macOS** and **Linux**.
 - **Multi-collection support** — eXoDOS and eXoWin3x, each with independent settings
 - **Browse 7,000+ games** with instant search and multi-filter support
 - **Three view modes** — List, Grid (box-art thumbnails), and Table
-- **Game detail panel** — box art, description, screenshots carousel, videos, documents
+- **Game detail panel** — box art, description, media gallery, music, videos, documents
 - **Launch and install** games via dosbox-staging, dosbox-x, or ScummVM
 - **Lite mode** — download individual game ZIPs on demand, either from a local/NAS source or directly via BitTorrent (requires aria2c)
 - **Cancel in-progress downloads** — a Cancel button appears during any active download
@@ -165,7 +165,7 @@ exogui-pyqt/
 ├── gui/
 │   ├── app_icon.py      Procedurally rendered application icon
 │   ├── flow_layout.py   Wrapping flow layout widget
-│   ├── game_detail.py   Right panel — art, metadata, screenshots, extras
+│   ├── game_detail.py   Right panel — art, metadata, media, extras
 │   ├── game_list.py     Left panel — list/grid/table views + filters
 │   ├── main_window.py   Main window, menu bar, settings dialog
 │   └── themes.py        Theme loader and switcher

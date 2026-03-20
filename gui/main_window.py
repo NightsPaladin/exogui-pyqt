@@ -7,7 +7,7 @@ from __future__ import annotations
 import json
 import os
 
-from PyQt6.QtCore import Qt, QTimer, QSettings, QByteArray, pyqtSlot
+from PyQt6.QtCore import Qt, QThread, QTimer, QSettings, QByteArray, pyqtSlot, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QAction, QActionGroup
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
@@ -363,6 +363,33 @@ class LoadingWidget(QWidget):
         self._sub.setText(text)
 
 
+# ── background library loader ─────────────────────────────────────────────────
+
+class _LibraryLoaderThread(QThread):
+    """
+    Runs GameLibrary.load() on a worker thread so the UI stays responsive.
+
+    Emits finished(library, project_id) on success or error(message, project_id)
+    on failure.  parent should be the MainWindow so Qt owns the lifetime.
+    """
+
+    finished: pyqtSignal = pyqtSignal(object, str)   # (GameLibrary, project_id)
+    error:    pyqtSignal = pyqtSignal(str,    str)    # (message,     project_id)
+
+    def __init__(self, library, project_id: str, force_reload: bool = False, parent=None):
+        super().__init__(parent)
+        self._library      = library
+        self._project_id   = project_id
+        self._force_reload = force_reload
+
+    def run(self) -> None:
+        try:
+            self._library.load(force_reload=self._force_reload)
+            self.finished.emit(self._library, self._project_id)
+        except Exception as exc:
+            self.error.emit(str(exc), self._project_id)
+
+
 # ── main window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):
@@ -484,7 +511,6 @@ class MainWindow(QMainWindow):
         display = cfg.display_name if cfg else self._active_id
         self._loading.set_label(f"Loading {display}…")
         self._loading.set_status("Parsing catalogue…")
-        QApplication.processEvents()
 
         lib = self._make_library(self._active_id)
         if lib is None:
@@ -495,28 +521,12 @@ class MainWindow(QMainWindow):
             self._show_no_project_ui()
             return
 
-        try:
-            lib.load()
-        except Exception as exc:
-            QMessageBox.critical(
-                self, "Error loading library",
-                f"Failed to load {display} catalogue:\n\n{exc}\n\n"
-                f"Check that the root path is correct.\nCurrent path: {root}"
-            )
-            self._show_no_project_ui()
-            return
-
-        self._libraries[self._active_id] = lib
-
-        launcher = self._make_launcher(self._active_id)
-        if launcher:
-            self._connect_launcher(launcher)
-            self._launchers[self._active_id] = launcher
-
-        self._loading.set_status(f"Loaded {len(lib.games):,} games.")
-        QApplication.processEvents()
-
-        self._build_main_ui()
+        self._loader = _LibraryLoaderThread(lib, self._active_id, self)
+        self._loader.finished.connect(self._on_library_loaded)
+        self._loader.error.connect(self._on_library_load_error)
+        self._loader.finished.connect(self._loader.deleteLater)
+        self._loader.error.connect(self._loader.deleteLater)
+        self._loader.start()
 
     def _show_no_project_ui(self) -> None:
         w = QWidget()
@@ -534,7 +544,51 @@ class MainWindow(QMainWindow):
         # On first launch auto-open Settings so the user doesn't see a blank screen.
         QTimer.singleShot(200, self._open_settings)
 
-    # ── build main UI ─────────────────────────────────────────────────────────
+    # ── library load callbacks ────────────────────────────────────────────────
+
+    @pyqtSlot(object, str)
+    def _on_library_loaded(self, lib, project_id: str) -> None:
+        self._libraries[project_id] = lib
+        launcher = self._make_launcher(project_id)
+        if launcher:
+            self._connect_launcher(launcher)
+            self._launchers[project_id] = launcher
+
+        if project_id != self._active_id:
+            return  # user switched away while loading; result is cached for later
+
+        if hasattr(self, "_list_panel"):
+            self._activate_project(project_id)
+        else:
+            self._loading.set_status(f"Loaded {len(lib.games):,} games.")
+            self._build_main_ui()
+
+    @pyqtSlot(str, str)
+    def _on_library_load_error(self, msg: str, project_id: str) -> None:
+        if project_id != self._active_id:
+            return
+        cfg, root = self._project_entry(project_id)
+        display = cfg.display_name if cfg else project_id
+        QMessageBox.critical(
+            self, "Error loading library",
+            f"Failed to load {display} catalogue:\n\n{msg}\n\n"
+            f"Check that the root path is correct.\nCurrent path: {root}"
+        )
+        self._show_no_project_ui()
+
+    def _activate_project(self, project_id: str) -> None:
+        """Update the existing UI to display a newly loaded (or cached) project."""
+        lib = self._libraries[project_id]
+        _, root = self._project_entry(project_id)
+        self._detail_panel._fallback = os.path.join(root, "eXo", "util", "exodos.png")
+        self._list_panel.set_library(lib)
+        total     = len(lib.games)
+        installed = len(lib.filter_installed())
+        cfg  = get_project(project_id)
+        name = cfg.display_name if cfg else project_id
+        self._set_status(f"{name}: {total:,} games  ·  {installed:,} installed")
+
+
 
     def _build_main_ui(self) -> None:
         lib = self._library
@@ -609,50 +663,29 @@ class MainWindow(QMainWindow):
         self._active_id = project_id
         self._settings.setValue("active_project", project_id)
 
-        # Load and cache library if not already loaded
-        if project_id not in self._libraries:
-            cfg = get_project(project_id)
-            display = cfg.display_name if cfg else project_id
-            self._set_status(f"Loading {display}…")
-            QApplication.processEvents()
+        # Use cached library immediately if already loaded
+        if project_id in self._libraries:
+            self._activate_project(project_id)
+            return
 
-            lib = self._make_library(project_id)
-            if lib is None:
-                QMessageBox.warning(
-                    self, "Project error",
-                    f"No root path configured for: {project_id}"
-                )
-                return
-            try:
-                lib.load()
-            except Exception as exc:
-                QMessageBox.critical(
-                    self, "Error loading library",
-                    f"Failed to load {display}:\n{exc}"
-                )
-                return
-            self._libraries[project_id] = lib
-
-            launcher = self._make_launcher(project_id)
-            if launcher:
-                self._connect_launcher(launcher)
-                self._launchers[project_id] = launcher
-
-        lib = self._libraries[project_id]
-        _, root = self._project_entry(project_id)
-
-        # Update detail panel fallback image path
-        self._detail_panel._fallback = os.path.join(root, "eXo", "util", "exodos.png")
-
-        # Swap library in list panel
-        self._list_panel.set_library(lib)
-
-        # Update status
-        total = len(lib.games)
-        installed = len(lib.filter_installed())
         cfg = get_project(project_id)
-        name = cfg.display_name if cfg else project_id
-        self._set_status(f"{name}: {total:,} games  ·  {installed:,} installed")
+        display = cfg.display_name if cfg else project_id
+        self._set_status(f"Loading {display}…")
+
+        lib = self._make_library(project_id)
+        if lib is None:
+            QMessageBox.warning(
+                self, "Project error",
+                f"No root path configured for: {project_id}"
+            )
+            return
+
+        self._loader = _LibraryLoaderThread(lib, project_id, self)
+        self._loader.finished.connect(self._on_library_loaded)
+        self._loader.error.connect(self._on_library_load_error)
+        self._loader.finished.connect(self._loader.deleteLater)
+        self._loader.error.connect(self._loader.deleteLater)
+        self._loader.start()
 
     # ── menu build ────────────────────────────────────────────────────────────
 
@@ -874,14 +907,25 @@ class MainWindow(QMainWindow):
     def _refresh_library(self) -> None:
         if not self._active_id:
             return
-        self._set_status("Refreshing…")
         lib = self._make_library(self._active_id)
-        if lib:
-            lib.load()
-            self._libraries[self._active_id] = lib
+        if lib is None:
+            return
+        self._set_status("Refreshing…")
+        project_id = self._active_id
+
+        def _on_refresh_done(refreshed_lib, pid: str) -> None:
+            if pid != self._active_id:
+                return
+            self._libraries[pid] = refreshed_lib
             if hasattr(self, "_list_panel"):
-                self._list_panel.set_library(lib)
-            self._set_status(f"Refreshed: {len(lib.games):,} games")
+                self._list_panel.set_library(refreshed_lib)
+            self._set_status(f"Refreshed: {len(refreshed_lib.games):,} games")
+
+        self._refresh_loader = _LibraryLoaderThread(lib, project_id, force_reload=True, parent=self)
+        self._refresh_loader.finished.connect(_on_refresh_done)
+        self._refresh_loader.finished.connect(self._refresh_loader.deleteLater)
+        self._refresh_loader.error.connect(self._refresh_loader.deleteLater)
+        self._refresh_loader.start()
 
     def _show_about(self) -> None:
         QMessageBox.about(
