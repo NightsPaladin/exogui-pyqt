@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QSettings, QByteArray, pyqtSlot, pyqtSignal
 from PyQt6.QtGui import QKeySequence, QAction, QActionGroup
@@ -14,22 +15,27 @@ from PyQt6.QtWidgets import (
     QSplitter, QDialog, QDialogButtonBox, QFormLayout,
     QLineEdit, QLabel, QPushButton, QApplication, QMessageBox,
     QProgressBar, QComboBox, QFileDialog, QScrollArea,
-    QGroupBox, QTabBar, QFrame,
+    QGroupBox, QTabBar, QFrame, QCheckBox,
 )
 
 from core.game_library import GameLibrary, Game
 from core.launcher import Launcher
 from core.image_cache import ImageCache
 from core.project import ProjectConfig, ALL_PROJECTS, detect_project, get_project
-from gui.game_list import GameListPanel
+from gui.game_list import GameListPanel, GRID_CELL_W, GRID_MIN_SPACING
 from gui.game_detail import GameDetailPanel
 from gui import themes
 
 
 APP_NAME     = "eXoGUI"
-APP_VERSION  = "0.2.0"
+APP_VERSION  = "0.3.0"
 WINDOW_W     = 1280
 WINDOW_H     = 800
+
+# Default left-panel width: exactly 3 grid columns + their spacing + the 8px scrollbar.
+# This ensures the grid view shows a clean 3-wide layout with no leftover space on the
+# right, matching the list_qss QScrollBar:vertical width defined in game_list.py.
+_LIST_PANEL_DEFAULT_W = 3 * (GRID_CELL_W + 2 * GRID_MIN_SPACING) + 8  # = 602
 
 # Directory that contains the exogui-pyqt/ package (i.e. the drive root layout).
 # All project/ZIP-source paths are stored relative to this so the app is
@@ -166,6 +172,115 @@ class _ProjectRow(QWidget):
         return self._remove_btn
 
 
+# ── emulator helpers ─────────────────────────────────────────────────────────
+
+def _default_emulators() -> list[dict]:
+    """Return macOS starter emulator entries (Linux uses dosbox_linux.txt directly)."""
+    return [
+        {"name": "dosbox-staging", "command": "dosbox-staging"},
+        {"name": "dosbox-x",       "command": "dosbox-x"},
+        {"name": "dosbox-ece",     "command": "dosbox-ece"},
+        {"name": "scummvm",        "command": "scummvm"},
+    ]
+
+
+def _load_emulators_from_settings(settings: QSettings) -> dict[str, str]:
+    """Return {family_name: command} from settings (macOS only).
+
+    On Linux dosbox_linux.txt already contains full commands, so no overrides
+    are needed and an empty dict is returned.
+    """
+    if sys.platform.startswith("linux"):
+        return {}
+    raw = settings.value("emulators", None)
+    if raw is None:
+        # Migrate from legacy individual keys if present
+        old = {
+            "dosbox-staging": settings.value("dosbox_staging", ""),
+            "dosbox-x":       settings.value("dosbox_x", ""),
+            "dosbox-ece":     settings.value("dosbox_ece", ""),
+            "scummvm":        settings.value("scummvm", ""),
+        }
+        entries = [{"name": k, "command": v} for k, v in old.items() if v]
+        if not entries:
+            return {}
+    else:
+        try:
+            entries = json.loads(raw)
+        except (json.JSONDecodeError, TypeError):
+            entries = []
+    return {e["name"]: e.get("command", "") for e in entries if e.get("name")}
+
+
+# ── per-emulator row widget ───────────────────────────────────────────────────
+
+class _EmulatorRow(QWidget):
+    """One row in the Settings > Emulator Commands section.
+
+    family name  |  command/path  |  Browse  |  ✕
+    """
+
+    def __init__(self, name: str, command: str, parent=None):
+        super().__init__(parent)
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setSpacing(8)
+
+        self._name_edit = QLineEdit(name)
+        self._name_edit.setPlaceholderText("name  (e.g. dosbox-staging)")
+        self._name_edit.setFixedWidth(148)
+        self._name_edit.setToolTip(
+            "Short emulator family name — must match names used in\n"
+            "eXo/util/dosbox_macos.txt\n"
+            "(e.g. dosbox-staging, dosbox-x, dosbox-ece, dosbox-074, wine, scummvm)"
+        )
+
+        self._command_edit = QLineEdit(command)
+        self._command_edit.setPlaceholderText("executable path or bare command…")
+        self._command_edit.setToolTip(
+            "Full path to the binary inside a .app bundle, e.g.\n"
+            "  /Applications/DOSBox-Staging.app/Contents/MacOS/dosbox-staging\n"
+            "or a bare command if it is on your PATH, e.g.\n"
+            "  dosbox-staging"
+        )
+
+        browse_btn = QPushButton("Browse…")
+        browse_btn.setFixedWidth(80)
+        browse_btn.clicked.connect(self._browse)
+
+        self._remove_btn = QPushButton("✕")
+        self._remove_btn.setFixedWidth(28)
+        self._remove_btn.setToolTip("Remove this emulator entry")
+
+        layout.addWidget(self._name_edit)
+        layout.addWidget(self._command_edit, 1)
+        layout.addWidget(browse_btn)
+        layout.addWidget(self._remove_btn)
+
+    def _browse(self) -> None:
+        # DontUseNativeDialog lets Qt navigate inside macOS .app bundles.
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select emulator executable",
+            self._command_edit.text() or os.path.expanduser("~"),
+            options=QFileDialog.Option.DontUseNativeDialog,
+        )
+        if path:
+            self._command_edit.setText(path)
+
+    @property
+    def name(self) -> str:
+        return self._name_edit.text().strip()
+
+    @property
+    def command(self) -> str:
+        return self._command_edit.text().strip()
+
+    @property
+    def remove_button(self) -> QPushButton:
+        return self._remove_btn
+
+
 # ── settings dialog ───────────────────────────────────────────────────────────
 
 class SettingsDialog(QDialog):
@@ -176,6 +291,7 @@ class SettingsDialog(QDialog):
         self.setMinimumHeight(420)
         self._settings = settings
         self._project_rows: list[_ProjectRow] = []
+        self._emu_rows: list[_EmulatorRow] = []
 
         outer = QVBoxLayout(self)
         outer.setSpacing(14)
@@ -237,24 +353,85 @@ class SettingsDialog(QDialog):
 
         outer.addWidget(projects_box)
 
-        # ── Emulator Commands ─────────────────────────────────────────────────
-        emu_box = QGroupBox("Emulator Commands")
-        emu_form = QFormLayout(emu_box)
-        emu_form.setSpacing(8)
+        # ── Emulator Commands (macOS only) ────────────────────────────────────
+        # On Linux, dosbox_linux.txt already contains full flatpak commands so
+        # no overrides are needed and this section is omitted.
+        if sys.platform == "darwin":
+            emu_box = QGroupBox("Emulator Commands")
+            emu_layout = QVBoxLayout(emu_box)
 
-        self._staging_edit = QLineEdit(settings.value("dosbox_staging", "dosbox-staging"))
-        emu_form.addRow("dosbox-staging:", self._staging_edit)
+            # Column headers
+            emu_hdr = QHBoxLayout()
+            emu_hdr.setSpacing(8)
+            emu_hdr_name = QLabel("Name")
+            emu_hdr_name.setFixedWidth(148)
+            emu_hdr_name.setStyleSheet("font-weight:bold; color:gray; font-size:11px;")
+            emu_hdr_cmd = QLabel("Command")
+            emu_hdr_cmd.setStyleSheet("font-weight:bold; color:gray; font-size:11px;")
+            emu_hdr.addWidget(emu_hdr_name)
+            emu_hdr.addWidget(emu_hdr_cmd, 1)
+            emu_hdr.addWidget(QLabel(""), 0)    # Browse placeholder
+            emu_hdr.addWidget(QLabel(""))       # Remove placeholder
+            emu_layout.addLayout(emu_hdr)
 
-        self._x_edit = QLineEdit(settings.value("dosbox_x", "dosbox-x"))
-        emu_form.addRow("dosbox-x:", self._x_edit)
+            emu_sep = QFrame()
+            emu_sep.setFrameShape(QFrame.Shape.HLine)
+            emu_layout.addWidget(emu_sep)
 
-        self._ece_edit = QLineEdit(settings.value("dosbox_ece", "dosbox-ece"))
-        emu_form.addRow("dosbox-ece:", self._ece_edit)
+            emu_scroll = QScrollArea()
+            emu_scroll.setWidgetResizable(True)
+            emu_scroll.setFrameShape(QFrame.Shape.NoFrame)
+            emu_scroll.setMinimumHeight(130)
 
-        self._scumm_edit = QLineEdit(settings.value("scummvm", "scummvm"))
-        emu_form.addRow("scummvm:", self._scumm_edit)
+            self._emu_rows_widget = QWidget()
+            self._emu_rows_layout = QVBoxLayout(self._emu_rows_widget)
+            self._emu_rows_layout.setContentsMargins(0, 0, 0, 0)
+            self._emu_rows_layout.setSpacing(2)
+            self._emu_rows_layout.addStretch()
+            emu_scroll.setWidget(self._emu_rows_widget)
+            emu_layout.addWidget(emu_scroll)
 
-        outer.addWidget(emu_box)
+            # Load emulator entries (migrate from old individual keys if needed)
+            raw_emu = settings.value("emulators", None)
+            if raw_emu is None:
+                old_staging = settings.value("dosbox_staging", "")
+                old_x       = settings.value("dosbox_x",       "")
+                old_ece     = settings.value("dosbox_ece",     "")
+                old_scumm   = settings.value("scummvm",        "")
+                if any([old_staging, old_x, old_ece, old_scumm]):
+                    emulators = [
+                        {"name": "dosbox-staging", "command": old_staging or "dosbox-staging"},
+                        {"name": "dosbox-x",       "command": old_x       or "dosbox-x"},
+                        {"name": "dosbox-ece",     "command": old_ece     or "dosbox-ece"},
+                        {"name": "scummvm",        "command": old_scumm   or "scummvm"},
+                    ]
+                else:
+                    emulators = _default_emulators()
+            else:
+                try:
+                    emulators = json.loads(raw_emu)
+                except (json.JSONDecodeError, TypeError):
+                    emulators = _default_emulators()
+
+            for e in emulators:
+                self._add_emu_row(e.get("name", ""), e.get("command", ""))
+
+            add_emu_btn = QPushButton("＋  Add Emulator")
+            add_emu_btn.setFixedWidth(160)
+            add_emu_btn.clicked.connect(self._add_empty_emu_row)
+            emu_layout.addWidget(add_emu_btn, 0, Qt.AlignmentFlag.AlignLeft)
+
+            outer.addWidget(emu_box)
+
+        # ── Playback Options ──────────────────────────────────────────────────
+        playback_box = QGroupBox("Playback")
+        playback_layout = QVBoxLayout(playback_box)
+        self._autoplay_check = QCheckBox("Auto-play music when a game is selected")
+        self._autoplay_check.setChecked(
+            settings.value("music_autoplay", "false").lower() == "true"
+        )
+        playback_layout.addWidget(self._autoplay_check)
+        outer.addWidget(playback_box)
 
         # ── Buttons ───────────────────────────────────────────────────────────
         buttons = QDialogButtonBox(
@@ -265,6 +442,21 @@ class SettingsDialog(QDialog):
         outer.addWidget(buttons)
 
     # ── internal helpers ──────────────────────────────────────────────────────
+
+    def _add_emu_row(self, name: str, command: str) -> None:
+        row = _EmulatorRow(name, command, self)
+        row.remove_button.clicked.connect(lambda: self._remove_emu_row(row))
+        idx = self._emu_rows_layout.count() - 1   # insert before stretch
+        self._emu_rows_layout.insertWidget(idx, row)
+        self._emu_rows.append(row)
+
+    def _remove_emu_row(self, row: _EmulatorRow) -> None:
+        self._emu_rows_layout.removeWidget(row)
+        row.deleteLater()
+        self._emu_rows.remove(row)
+
+    def _add_empty_emu_row(self) -> None:
+        self._add_emu_row("", "")
 
     def _add_row(self, project_id: str, root: str,
                  zip_source_path: str = "") -> None:
@@ -311,10 +503,18 @@ class SettingsDialog(QDialog):
                 f"project_{row.project_id}/zip_source_path",
                 _to_stored_path(row.zip_source_path),
             )
-        self._settings.setValue("dosbox_staging", self._staging_edit.text())
-        self._settings.setValue("dosbox_x",       self._x_edit.text())
-        self._settings.setValue("dosbox_ece",      self._ece_edit.text())
-        self._settings.setValue("scummvm",         self._scumm_edit.text())
+        emulators = [
+            {"name": r.name, "command": r.command}
+            for r in self._emu_rows if r.name
+        ]
+        self._settings.setValue("emulators", json.dumps(emulators))
+        # Remove legacy individual keys (migration clean-up)
+        for _old_key in ("dosbox_staging", "dosbox_x", "dosbox_ece", "scummvm"):
+            self._settings.remove(_old_key)
+        self._settings.setValue(
+            "music_autoplay",
+            "true" if self._autoplay_check.isChecked() else "false",
+        )
         self.accept()
 
 
@@ -476,7 +676,9 @@ class MainWindow(QMainWindow):
         zip_source = _from_stored_path(
             self._settings.value(f"project_{project_id}/zip_source_path", "")
         )
-        return Launcher(root, config=cfg, zip_source_path=zip_source, parent=self)
+        emulators = _load_emulators_from_settings(self._settings)
+        return Launcher(root, config=cfg, zip_source_path=zip_source,
+                        emulators=emulators, parent=self)
 
     def _connect_launcher(self, launcher: Launcher) -> None:
         launcher.launch_started.connect(self._on_launch_started)
@@ -484,6 +686,7 @@ class MainWindow(QMainWindow):
         launcher.launch_error.connect(self._on_launch_error)
         launcher.install_progress.connect(self._on_install_progress)
         launcher.install_finished.connect(self._on_install_finished)
+        launcher.uninstall_finished.connect(self._on_uninstall_finished)
         launcher.fetch_phase.connect(self._on_fetch_phase)
         launcher.fetch_progress.connect(self._on_fetch_progress)
         launcher.fetch_finished.connect(self._on_fetch_finished)
@@ -621,10 +824,14 @@ class MainWindow(QMainWindow):
 
         self._list_panel   = GameListPanel(lib, self._cache, root)
         self._detail_panel = GameDetailPanel(self._cache, root)
+        self._detail_panel.set_autoplay(
+            self._settings.value("music_autoplay", "false").lower() == "true"
+        )
 
         self._list_panel.game_selected.connect(self._on_game_selected)
         self._detail_panel.play_requested.connect(self._on_play_requested)
         self._detail_panel.install_requested.connect(self._on_install_requested)
+        self._detail_panel.uninstall_requested.connect(self._on_uninstall_requested)
         self._detail_panel.cancel_requested.connect(self._on_cancel_requested)
 
         self._splitter.addWidget(self._list_panel)
@@ -635,7 +842,7 @@ class MainWindow(QMainWindow):
             self._splitter.restoreState(saved_split)
         else:
             w = self.width() or WINDOW_W
-            self._splitter.setSizes([w // 2, w // 2])
+            self._splitter.setSizes([_LIST_PANEL_DEFAULT_W, max(1, w - _LIST_PANEL_DEFAULT_W - self._splitter.handleWidth())])
 
         outer.addWidget(self._splitter)
         self.setCentralWidget(central)
@@ -726,7 +933,7 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        act_reset_splitter = QAction("Reset split to 50/50", self)
+        act_reset_splitter = QAction("Reset split to default", self)
         act_reset_splitter.triggered.connect(self._reset_splitter)
         view_menu.addAction(act_reset_splitter)
 
@@ -741,6 +948,7 @@ class MainWindow(QMainWindow):
 
     def _build_status_bar(self) -> None:
         self._status = self.statusBar()
+        self._status.setContentsMargins(6, 0, 0, 0)
         self._status_label = QLabel("Ready")
         self._status.addWidget(self._status_label)
 
@@ -755,6 +963,7 @@ class MainWindow(QMainWindow):
     def _on_play_requested(self, game: Game) -> None:
         if self._launcher:
             self._set_status(f"Launching {game.title}…")
+            self._detail_panel.stop_audio()   # release audio device before handing off to emulator
             self._launcher.launch(game)
 
     @pyqtSlot(object)
@@ -767,6 +976,18 @@ class MainWindow(QMainWindow):
             else:
                 self._set_status(f"Installing {game.title}…")
                 self._launcher.install(game)
+
+    @pyqtSlot(object)
+    def _on_uninstall_requested(self, game: Game) -> None:
+        reply = QMessageBox.question(
+            self, "Uninstall game",
+            f"Remove installed files for '{game.title}'?\n\nThis cannot be undone.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if reply == QMessageBox.StandardButton.Yes and self._launcher:
+            self._set_status(f"Uninstalling {game.title}…")
+            self._launcher.uninstall(game)
 
     @pyqtSlot()
     def _on_cancel_requested(self) -> None:
@@ -814,6 +1035,21 @@ class MainWindow(QMainWindow):
             self._set_status(f"Installed: {name}")
         else:
             QMessageBox.warning(self, "Install error", msg)
+
+    @pyqtSlot(str, bool, str)
+    def _on_uninstall_finished(self, game_id: str, success: bool, msg: str) -> None:
+        lib = self._library
+        game = lib.get_by_id(game_id) if lib else None
+        if game and success:
+            game.installed = False
+        self._detail_panel.set_uninstall_done(success, msg)
+        if hasattr(self, "_list_panel"):
+            self._list_panel.refresh()
+        if success:
+            name = game.title if game else game_id
+            self._set_status(f"Uninstalled: {name}")
+        else:
+            QMessageBox.warning(self, "Uninstall error", msg)
 
     @pyqtSlot(str, str)
     def _on_fetch_phase(self, game_id: str, phase: str) -> None:
@@ -863,7 +1099,7 @@ class MainWindow(QMainWindow):
     def _reset_splitter(self) -> None:
         if hasattr(self, "_splitter"):
             w = self._splitter.width() or WINDOW_W
-            self._splitter.setSizes([w // 2, w // 2])
+            self._splitter.setSizes([_LIST_PANEL_DEFAULT_W, max(1, w - _LIST_PANEL_DEFAULT_W - self._splitter.handleWidth())])
             self._settings.remove("window/splitter")
 
     def _reset_window(self) -> None:
@@ -876,7 +1112,7 @@ class MainWindow(QMainWindow):
             self.move(sg.center() - self.rect().center())
         if hasattr(self, "_splitter"):
             w = self._splitter.width() or WINDOW_W
-            self._splitter.setSizes([w // 2, w // 2])
+            self._splitter.setSizes([_LIST_PANEL_DEFAULT_W, max(1, w - _LIST_PANEL_DEFAULT_W - self._splitter.handleWidth())])
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self._settings, self)
@@ -898,6 +1134,12 @@ class MainWindow(QMainWindow):
             self._active_id = self._projects[0]["id"] if self._projects else ""
 
         if self._projects:
+            # Invalidate stale widget references before replacing the central widget.
+            # Qt deletes child widgets when setCentralWidget is called, so Python
+            # references to _list_panel/_detail_panel/_splitter become dangling.
+            for _attr in ("_list_panel", "_detail_panel", "_splitter"):
+                if hasattr(self, _attr):
+                    delattr(self, _attr)
             self._loading = LoadingWidget(self)
             self.setCentralWidget(self._loading)
             QTimer.singleShot(100, self._load_active_project)

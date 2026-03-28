@@ -21,7 +21,6 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
-from typing import Optional
 
 # ── pre-compiled patterns (avoid per-call re-cache lookups) ──────────────────
 
@@ -259,41 +258,65 @@ _DETAIL_GALLERY_IMAGE_TYPES = tuple(dict.fromkeys(
     )
 ))
 
-_IS_LINUX = sys.platform.startswith("linux")
+_IS_LINUX   = sys.platform.startswith("linux")
+_IS_WINDOWS = sys.platform == "win32"
 
 # ── disk cache ────────────────────────────────────────────────────────────────
 # Bump _CACHE_VERSION whenever the Game dataclass or resolution logic changes
 # in a way that makes old cache files incompatible.
-_CACHE_VERSION = 1
+_CACHE_VERSION = 5
 _CACHE_BASE    = os.path.expanduser("~/.cache/exogui/library")
+
+# ── emulator display map ──────────────────────────────────────────────────────
+# Path to the plain-text mapping file that lives alongside this package.
+_APP_DIR             = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_EMU_DISPLAY_MAP_PATH = os.path.join(_APP_DIR, "emulator_display_map.txt")
+
+
+@lru_cache(maxsize=1)
+def _load_emu_display_map() -> dict[str, str]:
+    """
+    Load emulator_display_map.txt into a {raw_command: display_name} dict.
+
+    The file format is:  raw_command = display_name
+    Lines starting with # and blank lines are ignored.
+    The map is cached in memory after the first load.
+    """
+    result: dict[str, str] = {}
+    try:
+        with open(_EMU_DISPLAY_MAP_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#"):
+                    continue
+                if "=" in stripped:
+                    raw, _, display = stripped.partition("=")
+                    result[raw.strip()] = display.strip()
+    except OSError:
+        pass
+    return result
 
 
 def emulator_display_name(raw: str) -> str:
     """
-    Return a short human-readable emulator label from the raw emulator string.
+    Return a short human-readable emulator label for *raw*.
 
-    macOS entries are already short (e.g. "dosbox-staging", "dosbox-x", "scummvm").
-    Linux entries are flatpak invocations like
-      "flatpak run com.retro_exo.dosbox-staging-082-0"
-    which we abbreviate to just the emulator family.
+    Looks up *raw* in emulator_display_map.txt first.  Falls back to
+    extracting the app-id from flatpak commands, or returns the raw string
+    for macOS bare commands and unknown Windows paths.
     """
     if not raw:
         return ""
-    if "flatpak" not in raw:
-        return raw   # macOS: already short
-
-    # Extract the flatpak app-id component after the last dot
-    m = re.search(r"com\.retro_exo\.([^\s]+)", raw)
-    if not m:
-        return raw
-    app_id = m.group(1)  # e.g. "dosbox-staging-082-0"
-
-    # Normalise to family name
-    for family in ("dosbox-staging", "dosbox-x", "dosbox-ece", "dosbox-074",
-                   "dosbox-gridc", "scummvm", "gzdoom", "wine", "vlc", "aria2c"):
-        if app_id.startswith(family.replace("-", "-")):
-            return family
-    return app_id
+    emu_map = _load_emu_display_map()
+    if raw in emu_map:
+        return emu_map[raw]
+    # Fallback for flatpak commands not yet in the map: return the app-id
+    if "flatpak" in raw:
+        m = re.search(r"com\.retro_exo\.([^\s]+)", raw)
+        if m:
+            return m.group(1)
+    # Fallback for macOS bare commands, Windows paths, or any unknown format
+    return raw
 
 
 # ── data model ───────────────────────────────────────────────────────────────
@@ -424,15 +447,17 @@ class GameLibrary:
     """
 
     def __init__(self, root: str, xml_mode: str = "auto",
-                 config: Optional[ProjectConfig] = None):
+                 config: ProjectConfig | None = None):
         self.root = root
         self.xml_mode = xml_mode
         self._config = config if config is not None else EXODOS
 
         self.games: list[Game] = []
         self._by_id: dict[str, Game] = {}
-        self._emulator_map: dict[str, str] = {}   # lower(title) → emulator cmd
-        self._wine_notes: dict[str, str] = {}     # lower(title) → macOS warning note
+        self._emulator_map: dict[str, str] = {}        # lower(title) → emulator cmd
+        self._exception_emu_map: dict[str, str] = {}   # game_dir.lower() → emulator (exception.sh, highest priority)
+        self._wine_notes: dict[str, str] = {}          # lower(title) → macOS compat warning
+        self._exception_wine_notes: dict[str, str] = {} # game_dir.lower() → macOS compat warning (exception.sh games)
 
         self._image_base = self._config.abs_image_base(root)
         self._dos_base   = self._config.abs_scripts(root)
@@ -519,7 +544,7 @@ class GameLibrary:
                     modes.add(m)
         return sorted(modes)
 
-    def get_by_id(self, game_id: str) -> Optional[Game]:
+    def get_by_id(self, game_id: str) -> Game | None:
         return self._by_id.get(game_id)
 
     # ── disk cache ────────────────────────────────────────────────────────────
@@ -528,8 +553,15 @@ class GameLibrary:
         """
         MD5 fingerprint of the files that affect the fully-resolved game list.
         Any mtime change invalidates the cache for this project.
+        The platform string is included so macOS and Linux caches never collide
+        even when the collection lives on a shared drive.
         """
-        emu_file = "dosbox_linux.txt" if _IS_LINUX else "dosbox_macos.txt"
+        if _IS_LINUX:
+            emu_file = "dosbox_linux.txt"
+        elif _IS_WINDOWS:
+            emu_file = "dosbox.txt"
+        else:
+            emu_file = "dosbox_macos.txt"
         paths = [
             self._config.xml_path(self.root, self.xml_mode),
             self._image_base,
@@ -538,7 +570,7 @@ class GameLibrary:
             self._config.abs_video_base(self.root),
             os.path.join(self.root, "eXo", "util", emu_file),
         ]
-        parts = [self._config.id, self.xml_mode, str(_CACHE_VERSION)]
+        parts = [self._config.id, self.xml_mode, str(_CACHE_VERSION), sys.platform]
         for p in paths:
             try:
                 parts.append(f"{os.path.getmtime(p):.0f}")
@@ -601,16 +633,22 @@ class GameLibrary:
         """
         Load the platform-appropriate dosbox_*.txt → {lower_title: emulator_command}
 
-        macOS: eXo/util/dosbox_macos.txt  (bare commands: dosbox-staging, dosbox-x …)
-        Linux: eXo/util/dosbox_linux.txt  (flatpak invocations)
+        macOS:   eXo/util/dosbox_macos.txt  (bare commands: dosbox-staging, dosbox-x …)
+        Linux:   eXo/util/dosbox_linux.txt  (flatpak invocations)
+        Windows: eXo/util/dosbox.txt        (relative exe paths, e.g. staging0.82.0\\dosbox.exe)
 
         Entries use the format "Game Title (Year):emulator".
         The year suffix is stripped so we can match against XML titles.
 
-        Also scans the *other* platform's file on macOS to flag games that require
+        Also scans the Linux file on macOS to flag games that require
         Wine (Windows-only DOSBox variants unavailable on macOS).
         """
-        primary_file = "dosbox_linux.txt" if _IS_LINUX else "dosbox_macos.txt"
+        if _IS_LINUX:
+            primary_file = "dosbox_linux.txt"
+        elif _IS_WINDOWS:
+            primary_file = "dosbox.txt"
+        else:
+            primary_file = "dosbox_macos.txt"
         path = os.path.join(self.root, "eXo", "util", primary_file)
         if not os.path.exists(path):
             return
@@ -625,9 +663,55 @@ class GameLibrary:
                 self._emulator_map[title.lower()] = emu
                 self._emulator_map[title_with_year.strip().lower()] = emu
 
-        # On macOS: scan dosbox_linux.txt to find games that need Wine (Windows-only
-        # DOSBox variants).  These are flagged with a compatibility note in the UI.
-        if not _IS_LINUX:
+        # Scan exception.sh/bsh files in the !dos directory for games that invoke
+        # the Wine flatpak with a Windows DOSBox ECE binary.
+        #
+        # Linux:  update the emulator map so the correct Wine-annotated name is
+        #         displayed (these games have a misleading native entry in
+        #         dosbox_linux.txt that the exception.sh overrides at runtime).
+        #
+        # macOS:  the game still runs via native DOSBox (dosbox_macos.txt), but
+        #         Windows-only helper utilities (e.g. Dune2MouseHelper.exe) won't
+        #         work.  Record a compat note so the UI can warn the user.
+        if _IS_LINUX or not _IS_WINDOWS:
+            _re_wine_ece = re.compile(
+                r"com\.retro_exo\.wine\b.*?emulators/dosbox/([^/\"'\s\\]+)/dosbox\.exe",
+                re.IGNORECASE,
+            )
+            dos_dir = os.path.join(self.root, "eXo", self._config.id, "!dos")
+            if os.path.isdir(dos_dir):
+                for game_dir in os.listdir(dos_dir):
+                    for exc_name in ("exception.sh", "exception.bsh"):
+                        exc_path = os.path.join(dos_dir, game_dir, exc_name)
+                        if not os.path.isfile(exc_path):
+                            continue
+                        try:
+                            with open(exc_path, errors="replace") as f:
+                                content = f.read()
+                        except OSError:
+                            break
+                        m = _re_wine_ece.search(content)
+                        if m:
+                            variant = m.group(1)  # e.g. "ece4230"
+                            if _IS_LINUX:
+                                canonical = (
+                                    f"flatpak run com.retro_exo.wine "
+                                    f"emulators/dosbox/{variant.lower()}/dosbox.exe"
+                                )
+                                self._emulator_map[game_dir.lower()] = canonical
+                                self._exception_emu_map[game_dir.lower()] = canonical
+                            else:
+                                # macOS: native DOSBox is used instead; warn that
+                                # Windows-only helper utilities won't be available.
+                                self._exception_wine_notes[game_dir.lower()] = (
+                                    f"Originally runs Windows DOSBox ({variant}) via Wine — "
+                                    "native DOSBox is used on macOS; helper utilities and "
+                                    "some features may not work correctly"
+                                )
+                        break  # only process first exception file found per game
+
+        # (Windows-only DOSBox variants).  These are flagged with a compat note.
+        if not _IS_LINUX and not _IS_WINDOWS:
             _emu_notes = {
                 "gunstick_dosbox": (
                     "Requires GunStick DOSBox (Windows-only) — "
@@ -723,13 +807,40 @@ class GameLibrary:
             if root_folder_unix.startswith(".."):
                 continue
 
-            # Emulator from map; fall back to project default
-            game.emulator = self._emulator_map.get(
-                title.lower(), self._config.default_emulator
+            # Emulator from map.
+            # exception.sh override (highest priority): games whose launch
+            # script invokes Wine+DOSBox instead of a native flatpak build.
+            # These are keyed by game_dir and must win over dosbox_linux.txt
+            # entries (which are keyed by title/launch_stem and would otherwise
+            # shadow the correct Wine-variant emulator).
+            # Primary key: XML title (matches most entries in dosbox_linux.txt).
+            # Fallback key: launch_stem (bat filename without .bat), which uses
+            # the same "Title (Year)" format as dosbox_*.txt entries, catching
+            # games like "Dune II: The Building of a Dynasty" (XML) vs
+            # "Dune 2 - The Building of a Dynasty (1992)" (dosbox_linux.txt).
+            # Final fallback: game_dir (also covers exception.sh games not in
+            # dosbox_linux.txt at all).
+            game.emulator = self._exception_emu_map.get(
+                game.game_dir.lower(),
+                self._emulator_map.get(
+                    title.lower(),
+                    self._emulator_map.get(
+                        game.launch_stem.lower(),
+                        self._emulator_map.get(
+                            game.game_dir.lower(),
+                            self._config.default_emulator,
+                        ),
+                    ),
+                ),
             )
 
-            # macOS compatibility note (e.g. Wine-dependent games)
-            game.compat_note = self._wine_notes.get(title.lower(), "")
+            # macOS compatibility note (e.g. Wine-dependent games).
+            # exception.sh-detected Wine games are keyed by game_dir (highest
+            # priority); dosbox_linux.txt-detected Wine games are keyed by title.
+            game.compat_note = self._exception_wine_notes.get(
+                game.game_dir.lower(),
+                self._wine_notes.get(title.lower(), ""),
+            )
 
             self.games.append(game)
             if game.id:

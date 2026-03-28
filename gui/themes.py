@@ -24,6 +24,8 @@ from pathlib import Path
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
+from core import debug
+
 
 # ── theme directory ───────────────────────────────────────────────────────────
 
@@ -196,7 +198,8 @@ def _load_themes() -> dict[str, ThemeColors]:
     """Scan THEMES_DIR for *.json files and return name → ThemeColors map."""
     result: dict[str, ThemeColors] = {}
     if not THEMES_DIR.exists():
-        print(f"[themes] themes directory not found: {THEMES_DIR}", file=sys.stderr)
+        if debug.enabled:
+            print(f"[themes] themes directory not found: {THEMES_DIR}", file=sys.stderr)
         return result
     for path in sorted(THEMES_DIR.glob("*.json")):
         if path.name.startswith("."):
@@ -207,7 +210,8 @@ def _load_themes() -> dict[str, ThemeColors]:
             t = ThemeColors.from_dict(data)
             result[t.name] = t
         except Exception as exc:
-            print(f"[themes] Skipping {path.name}: {exc}", file=sys.stderr)
+            if debug.enabled:
+                print(f"[themes] Skipping {path.name}: {exc}", file=sys.stderr)
     return result
 
 

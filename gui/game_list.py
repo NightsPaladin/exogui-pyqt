@@ -5,7 +5,6 @@ game_list.py — Left-panel game list with thumbnail, search, and filtering.
 from __future__ import annotations
 
 import os
-from typing import Optional
 
 from PyQt6.QtCore import (
     Qt, QSortFilterProxyModel, QModelIndex, pyqtSignal,
@@ -142,7 +141,7 @@ class GameListModel(QAbstractTableModel):
             return self._dot_installed if game.installed else self._dot_not_installed
         return QVariant()
 
-    def game_at(self, row: int) -> Optional[Game]:
+    def game_at(self, row: int) -> Game | None:
         if 0 <= row < len(self._games):
             return self._games[row]
         return None
@@ -175,7 +174,7 @@ class GameItemDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
               index: QModelIndex) -> None:
-        game: Optional[Game] = index.data(GameListModel.GAME_ROLE)
+        game: Game | None = index.data(GameListModel.GAME_ROLE)
         if not game:
             super().paint(painter, option, index)
             return
@@ -262,17 +261,16 @@ class GameItemDelegate(QStyledItemDelegate):
 # ── grid delegate ─────────────────────────────────────────────────────────────
 
 class CenteredGridView(QListView):
-    """QListView (IconMode) that distributes horizontal space evenly so tiles
-    fill the full width and reflow naturally when the window resizes.
+    """QListView (IconMode) that reflows tiles as the panel is resized.
 
-    Rather than fighting with setSpacing() (which Qt only applies on the
-    left/between items, leaving a ragged right edge), we expand the grid cell
-    width so that cols × cell_w == viewport_width.  The delegate already
-    centres art and title within whatever rect it receives, so wider cells
-    look correct without any other changes.
+    Tiles are fixed-size squares (GRID_CELL_W × GRID_CELL_W) with a constant
+    gap on every side (GRID_MIN_SPACING).  The number of columns snaps up or
+    down as the viewport crosses each column-width threshold; leftover space
+    after the last column simply remains empty.  This avoids stretched tiles
+    or a ragged right edge.
     """
 
-    _FIXED_SPACING = GRID_MIN_SPACING   # constant px gap on each side
+    _FIXED_SPACING = GRID_MIN_SPACING   # constant px gap on each side of every tile
 
     def resizeEvent(self, event) -> None:
         super().resizeEvent(event)
@@ -282,18 +280,22 @@ class CenteredGridView(QListView):
         super().showEvent(event)
         self._adjust_grid()
 
+    def updateGeometries(self) -> None:
+        # Called by Qt when scrollbar visibility changes (viewport shrinks/grows).
+        # Re-run grid adjustment so column count reflects the new viewport width.
+        super().updateGeometries()
+        self._adjust_grid()
+
     def _adjust_grid(self) -> None:
         avail = self.viewport().width()
         if avail <= 0:
             return
         s = self._FIXED_SPACING
-        # How many columns fit at the minimum cell width?
-        cols = max(1, avail // (GRID_CELL_W + s * 2))
-        # Expand cell width so the row fills the viewport exactly; cell is square
-        cell_w = max(GRID_CELL_W, (avail - s * 2 * cols) // cols)
-        new_size = QSize(cell_w, cell_w)   # square
-        if self.gridSize() != new_size:
-            self.setGridSize(new_size)
+        # Qt calculates column count automatically from gridSize + spacing.
+        # Each slot is tile + spacing on both sides; columns snap as the viewport changes.
+        fixed = QSize(GRID_CELL_W, GRID_CELL_H)
+        if self.gridSize() != fixed:
+            self.setGridSize(fixed)
         if self.spacing() != s:
             self.setSpacing(s)
 
@@ -319,7 +321,7 @@ class GridItemDelegate(QStyledItemDelegate):
 
     def paint(self, painter: QPainter, option: QStyleOptionViewItem,
               index: QModelIndex) -> None:
-        game: Optional[Game] = index.data(GameListModel.GAME_ROLE)
+        game: Game | None = index.data(GameListModel.GAME_ROLE)
         if not game:
             super().paint(painter, option, index)
             return

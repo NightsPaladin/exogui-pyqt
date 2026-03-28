@@ -3,10 +3,13 @@
 main.py — Entry point for exogui-pyqt (unified macOS + Linux GUI).
 
 Usage:
-    python3 main.py [/path/to/eXoDOS]
+    python3 main.py [-d | --debug] [/path/to/eXoDOS]
 
 The eXoDOS root defaults to the parent directory of this script's directory,
 i.e. the mounted eXoDOS volume root.
+
+Flags:
+    -d, --debug     Enable diagnostic output (audio device info, theme errors, etc.)
 """
 
 import os
@@ -86,8 +89,36 @@ def _fix_macos_menu_name(name: str) -> None:
         pass
 
 
+def _setup_linux_audio() -> None:
+    """
+    Steer Qt6's PulseAudio output toward PipeWire's compatibility socket.
+
+    pip-installed PyQt6 bundles Qt 6.x which uses libpulse for audio output on
+    Linux.  libpulse auto-discovers the server via XDG_RUNTIME_DIR, but setting
+    PULSE_SERVER explicitly avoids races and ensures the correct PipeWire-pulse
+    socket is used before Qt initialises its audio subsystem.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    if "PULSE_SERVER" in os.environ:
+        return
+    try:
+        xdg = os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        sock = os.path.join(xdg, "pulse", "native")
+        if os.path.exists(sock):
+            os.environ["PULSE_SERVER"] = f"unix:{sock}"
+    except (AttributeError, OSError):
+        pass
+
+
 def main() -> None:
+    import core.debug
+    core.debug.enabled = "-d" in sys.argv or "--debug" in sys.argv
+
     root = find_project_root(sys.argv)
+
+    # On Linux: ensure Qt's bundled libpulse can reach PipeWire before Qt init
+    _setup_linux_audio()
 
     # Import Qt here so errors are more readable if PyQt6 is missing
     try:

@@ -21,7 +21,6 @@ import shutil
 import subprocess
 import sys
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 # ── data types ────────────────────────────────────────────────────────────────
@@ -138,14 +137,9 @@ def load_index(index_path: str) -> dict[str, GameEntry]:
     return result
 
 
-def lookup_game(gamename: str, index: dict[str, GameEntry]) -> Optional[GameEntry]:
-    """Look up *gamename* in a pre-loaded index dict."""
-    return index.get(gamename)
-
-
 # ── aria2c detection ──────────────────────────────────────────────────────────
 
-def find_aria2c() -> Optional[str]:
+def find_aria2c() -> str | None:
     """
     Return the aria2c command string for the current platform, or None.
 
@@ -181,8 +175,7 @@ def find_aria2c() -> Optional[str]:
 def build_aria2c_command(
     aria2c_cmd: str,
     torrent_path: str,
-    file_index: int,
-    out_filename: str,
+    files: list[tuple[int, str]],
 ) -> list[str]:
     """
     Build the argv list for a selective aria2c torrent download.
@@ -193,10 +186,9 @@ def build_aria2c_command(
         The aria2c executable / flatpak invocation string.
     torrent_path : str
         Absolute path to the ``.torrent`` file.
-    file_index : int
-        1-based file number within the torrent (from index.txt).
-    out_filename : str
-        Desired output filename, e.g. ``"Dune 2 - … (1992).zip"``.
+    files : list of (torrent_index, output_filename)
+        Each entry selects one file from the torrent by its 1-based index
+        (from index.txt) and names the output file.
 
     Returns
     -------
@@ -204,9 +196,11 @@ def build_aria2c_command(
         Ready to pass to ``subprocess.Popen``.
     """
     argv = aria2c_cmd.split()
+    # --select-file takes a comma-separated list of 1-based indices
+    argv.append(f"--select-file={','.join(str(idx) for idx, _ in files)}")
+    for idx, fname in files:
+        argv.append(f"--index-out={idx}={fname}")
     argv += [
-        f"--select-file={file_index}",
-        f"--index-out={file_index}={out_filename}",
         "--file-allocation=none",
         "--allow-overwrite=true",
         "--seed-time=0",

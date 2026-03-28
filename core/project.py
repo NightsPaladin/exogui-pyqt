@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass, field
-from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -68,6 +67,7 @@ class ProjectConfig:
     default_emulator: str       # fallback when emulator map has no entry
     detect_marker: str          # relative path to test for auto-detection
     torrent_name: str = ""      # torrent filename in eXo/util/aria/, e.g. "eXoDOS.torrent"
+    gamedata_zip_subdir: str = ""  # directory holding per-game extras ZIPs, e.g. "Content/GameData/eXoDOS"
 
     def xml_path(self, root: str, xml_mode: str = "auto") -> str:
         """Return the absolute path to the XML file for the given mode."""
@@ -92,6 +92,12 @@ class ProjectConfig:
 
     def abs_scripts(self, root: str) -> str:
         return os.path.join(root, *self.scripts_subdir.split("/"))
+
+    def abs_gamedata_zip_base(self, root: str) -> str:
+        """Absolute path to the per-game extras ZIP directory, or '' if not configured."""
+        if not self.gamedata_zip_subdir:
+            return ""
+        return os.path.join(root, *self.gamedata_zip_subdir.split("/"))
 
     def aria_index_path(self, root: str) -> str:
         """Absolute path to the aria2c index file."""
@@ -126,6 +132,9 @@ EXODOS = ProjectConfig(
     default_emulator="dosbox-staging",
     detect_marker="eXo/eXoDOS",
     torrent_name="eXoDOS.torrent",
+    # GameData ZIPs contain per-game videos, music, manuals, and in-game extras.
+    # They live in Content/GameData/eXoDOS/ and extract to the collection root.
+    gamedata_zip_subdir="Content/GameData/eXoDOS",
 )
 
 EXOWIN3X = ProjectConfig(
@@ -152,12 +161,12 @@ ALL_PROJECTS: list[ProjectConfig] = [EXODOS, EXOWIN3X]
 _BY_ID: dict[str, ProjectConfig] = {p.id: p for p in ALL_PROJECTS}
 
 
-def get_project(project_id: str) -> Optional[ProjectConfig]:
+def get_project(project_id: str) -> ProjectConfig | None:
     """Return the ProjectConfig for *project_id*, or None if unknown."""
     return _BY_ID.get(project_id)
 
 
-def detect_project(root: str) -> Optional[ProjectConfig]:
+def detect_project(root: str) -> ProjectConfig | None:
     """
     Auto-detect which project type lives at *root* by checking for known
     marker paths.  Returns the first match or None.

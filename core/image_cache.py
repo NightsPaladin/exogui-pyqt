@@ -15,7 +15,7 @@ import hashlib
 import os
 import subprocess
 from collections import OrderedDict
-from typing import Callable, Optional
+from typing import Callable
 
 from PyQt6.QtCore import QObject, QRunnable, QThreadPool, Qt, pyqtSignal, pyqtSlot
 from PyQt6.QtGui import QPixmap
@@ -98,8 +98,8 @@ class ImageCache(QObject):
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def get(self, path: str, callback: Optional[Callable[[str, QPixmap], None]] = None,
-            scaled_to: Optional[tuple[int, int]] = None) -> Optional[QPixmap]:
+    def get(self, path: str, callback: Callable[[str, QPixmap], None] | None = None,
+            scaled_to: tuple[int, int] | None = None) -> QPixmap | None:
         """
         Return a QPixmap for *path* if already cached, else schedule a load.
         *callback* is called with (path, pixmap) on the main thread when ready.
@@ -129,8 +129,8 @@ class ImageCache(QObject):
         return None
 
     def get_video_thumb(self, video_path: str,
-                        callback: Optional[Callable[[str, QPixmap], None]] = None,
-                        scaled_to: Optional[tuple[int, int]] = None) -> Optional[QPixmap]:
+                        callback: Callable[[str, QPixmap], None] | None = None,
+                        scaled_to: tuple[int, int] | None = None) -> QPixmap | None:
         """
         Return a thumbnail QPixmap for *video_path*.
 
@@ -188,7 +188,7 @@ class ImageCache(QObject):
     # ── private ───────────────────────────────────────────────────────────────
 
     def _on_raw_loaded(self, cache_key: str, pm: QPixmap,
-                       scaled_to: Optional[tuple[int, int]]) -> None:
+                       scaled_to: tuple[int, int] | None) -> None:
         if scaled_to and not pm.isNull():
             pm = pm.scaled(scaled_to[0], scaled_to[1],
                            Qt.AspectRatioMode.KeepAspectRatio,

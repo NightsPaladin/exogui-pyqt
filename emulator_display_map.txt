@@ -1,0 +1,40 @@
+# Emulator display name mapping
+# Format:  raw_command = display_name
+# Lines starting with # are comments; blank lines are ignored.
+#
+# The raw_command must match exactly what appears after the colon (:) in the
+# platform-specific dosbox_linux.txt / dosbox_macos.txt / dosbox.txt file.
+#
+# Adding entries here for a new collection or emulator version is all that is
+# needed to display a friendly name in the GUI — no code changes required.
+#
+# ── Linux (flatpak commands) ──────────────────────────────────────────────────
+flatpak run com.retro_exo.dosbox-074r3-1                              = dosbox-0.74
+flatpak run com.retro_exo.dosbox-ece-r4301                            = dosbox-ece-r4301
+flatpak run com.retro_exo.dosbox-ece-r4358                            = dosbox-ece-r4358
+flatpak run com.retro_exo.dosbox-ece-r4482                            = dosbox-ece-r4482
+flatpak run com.retro_exo.dosbox-staging-081-2                        = dosbox-staging-0.81
+flatpak run com.retro_exo.dosbox-staging-082-0                        = dosbox-staging-0.82
+flatpak run com.retro_exo.dosbox-x-08220                              = dosbox-x-0.82
+flatpak run com.retro_exo.dosbox-x-20240701                           = dosbox-x-2024
+flatpak run com.retro_exo.scummvm-2-2-0                               = scummvm-2.2
+flatpak run com.retro_exo.scummvm-2-3-0-git15811-gf97bfb7ce1          = scummvm-2.3
+flatpak run com.retro_exo.gzdoom-4-11-3                               = gzdoom-4.11
+flatpak run com.retro_exo.wine emulators/dosbox/daum/dosbox.exe       = dosbox-daum-wine
+flatpak run com.retro_exo.wine emulators/dosbox/DOSBox.exe            = dosbox-wine
+flatpak run com.retro_exo.wine emulators/dosbox/GunStick_dosbox/dosbox.exe = dosbox-gunstick-wine
+flatpak run com.retro_exo.wine emulators/dosbox/ece4230/dosbox.exe    = dosbox-ece-4230-wine
+flatpak run com.retro_exo.wine emulators/dosbox/ece4481/dosbox.exe    = dosbox-ece-4481-wine
+# ── macOS (bare commands) ─────────────────────────────────────────────────────
+dosbox-staging                                                         = dosbox-staging
+dosbox-x                                                               = dosbox-x
+# ── Windows (relative exe paths) ─────────────────────────────────────────────
+dosbox.exe                                                             = dosbox-0.74
+daum\dosbox.exe                                                        = dosbox-daum
+ece4230\dosbox.exe                                                     = dosbox-ece-4230
+ece4460\dosbox.exe                                                     = dosbox-ece-4460
+GunStick_dosbox\dosbox.exe                                             = dosbox-gunstick
+staging0.81.1\dosbox.exe                                               = dosbox-staging-0.81
+staging0.82.0\dosbox.exe                                               = dosbox-staging-0.82
+x\dosbox.exe                                                           = dosbox-x
+x2\dosbox.exe                                                          = dosbox-x-2
