@@ -9,4 +9,14 @@ Import this wherever conditional debug output is needed:
         print("[component] ...", file=sys.stderr)
 """
 
+from __future__ import annotations
+
+import sys
+
 enabled: bool = False
+
+
+def dbg(message: str) -> None:
+    """Print *message* to stderr when debug logging is enabled."""
+    if enabled:
+        print(message, file=sys.stderr)

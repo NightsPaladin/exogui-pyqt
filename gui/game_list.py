@@ -5,16 +5,17 @@ game_list.py — Left-panel game list with thumbnail, search, and filtering.
 from __future__ import annotations
 
 import os
+from typing import Optional
 
 from PyQt6.QtCore import (
     Qt, QSortFilterProxyModel, QModelIndex, pyqtSignal,
     QAbstractTableModel, QVariant, QSize, QRect, QItemSelectionModel, QTimer,
 )
-from PyQt6.QtGui import QPixmap, QIcon, QColor, QPainter, QFont, QPalette, QPen
+from PyQt6.QtGui import QPixmap, QColor, QPainter, QFont, QPalette, QPen
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLineEdit,
-    QListView, QComboBox, QLabel, QSizePolicy,
-    QStyledItemDelegate, QStyleOptionViewItem, QApplication, QStyle,
+    QListView, QComboBox, QLabel,
+    QStyledItemDelegate, QStyleOptionViewItem, QStyle,
     QFrame, QStackedWidget, QPushButton,
     QTreeView, QHeaderView, QAbstractItemView,
 )
@@ -87,13 +88,15 @@ class GameListModel(QAbstractTableModel):
     Column 0 also carries a small installed-status dot via DecorationRole.
     """
 
-    GAME_ROLE = Qt.ItemDataRole.UserRole + 1
+    GAME_ROLE     = Qt.ItemDataRole.UserRole + 1
+    FAVORITE_ROLE = Qt.ItemDataRole.UserRole + 2
 
     _HEADERS = ("Title", "Year", "Developer", "Publisher", "Genre")
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self._games: list[Game] = []
+        self._favorites: set[str] = set()
         self._dot_installed     = self._make_dot(QColor("#4caf50"))
         self._dot_not_installed = self._make_dot(QColor("#666666"))
 
@@ -114,6 +117,15 @@ class GameListModel(QAbstractTableModel):
         self._games = games
         self.endResetModel()
 
+    def set_favorites(self, favorites: set[str]) -> None:
+        self._favorites = favorites
+        if self._games:
+            self.dataChanged.emit(
+                self.index(0, 0),
+                self.index(len(self._games) - 1, 0),
+                [self.FAVORITE_ROLE],
+            )
+
     def rowCount(self, parent=QModelIndex()) -> int:
         return len(self._games)
 
@@ -133,6 +145,8 @@ class GameListModel(QAbstractTableModel):
         game = self._games[index.row()]
         if role == self.GAME_ROLE:
             return game
+        if role == self.FAVORITE_ROLE:
+            return bool(game.id) and game.id in self._favorites
         col = index.column()
         if role == Qt.ItemDataRole.DisplayRole:
             return (game.title, game.display_year, game.developer,
@@ -141,7 +155,7 @@ class GameListModel(QAbstractTableModel):
             return self._dot_installed if game.installed else self._dot_not_installed
         return QVariant()
 
-    def game_at(self, row: int) -> Game | None:
+    def game_at(self, row: int) -> Optional[Game]:
         if 0 <= row < len(self._games):
             return self._games[row]
         return None
@@ -172,9 +186,11 @@ class GameItemDelegate(QStyledItemDelegate):
                          Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
 
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+    def paint(self, painter: QPainter | None, option: QStyleOptionViewItem,
               index: QModelIndex) -> None:
-        game: Game | None = index.data(GameListModel.GAME_ROLE)
+        if painter is None:
+            return
+        game: Optional[Game] = index.data(GameListModel.GAME_ROLE)
         if not game:
             super().paint(painter, option, index)
             return
@@ -252,6 +268,13 @@ class GameItemDelegate(QStyledItemDelegate):
         dot_y = rect.top() + (rect.height() - 8) // 2
         painter.drawEllipse(dot_x, dot_y, 8, 8)
 
+        # Favorite star (top-right, above the installed dot)
+        if bool(index.data(GameListModel.FAVORITE_ROLE)):
+            painter.setFont(self._meta_font)
+            painter.setPen(QColor("#ffd700"))
+            painter.drawText(rect.right() - 18, rect.top() + 2, 16, 16,
+                             Qt.AlignmentFlag.AlignCenter, "★")
+
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
@@ -261,41 +284,41 @@ class GameItemDelegate(QStyledItemDelegate):
 # ── grid delegate ─────────────────────────────────────────────────────────────
 
 class CenteredGridView(QListView):
-    """QListView (IconMode) that reflows tiles as the panel is resized.
+    """QListView (IconMode) that distributes horizontal space evenly so tiles
+    fill the full width and reflow naturally when the window resizes.
 
-    Tiles are fixed-size squares (GRID_CELL_W × GRID_CELL_W) with a constant
-    gap on every side (GRID_MIN_SPACING).  The number of columns snaps up or
-    down as the viewport crosses each column-width threshold; leftover space
-    after the last column simply remains empty.  This avoids stretched tiles
-    or a ragged right edge.
+    Rather than fighting with setSpacing() (which Qt only applies on the
+    left/between items, leaving a ragged right edge), we expand the grid cell
+    width so that cols × cell_w == viewport_width.  The delegate already
+    centres art and title within whatever rect it receives, so wider cells
+    look correct without any other changes.
     """
 
-    _FIXED_SPACING = GRID_MIN_SPACING   # constant px gap on each side of every tile
+    _FIXED_SPACING = GRID_MIN_SPACING   # constant px gap on each side
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
+    def resizeEvent(self, e) -> None:
+        super().resizeEvent(e)
         self._adjust_grid()
 
-    def showEvent(self, event) -> None:
-        super().showEvent(event)
-        self._adjust_grid()
-
-    def updateGeometries(self) -> None:
-        # Called by Qt when scrollbar visibility changes (viewport shrinks/grows).
-        # Re-run grid adjustment so column count reflects the new viewport width.
-        super().updateGeometries()
+    def showEvent(self, a0) -> None:
+        super().showEvent(a0)
         self._adjust_grid()
 
     def _adjust_grid(self) -> None:
-        avail = self.viewport().width()
+        vp = self.viewport()
+        if not vp:
+            return
+        avail = vp.width()
         if avail <= 0:
             return
         s = self._FIXED_SPACING
-        # Qt calculates column count automatically from gridSize + spacing.
-        # Each slot is tile + spacing on both sides; columns snap as the viewport changes.
-        fixed = QSize(GRID_CELL_W, GRID_CELL_H)
-        if self.gridSize() != fixed:
-            self.setGridSize(fixed)
+        # How many columns fit at the minimum cell width?
+        cols = max(1, avail // (GRID_CELL_W + s * 2))
+        # Expand cell width so the row fills the viewport exactly; cell is square
+        cell_w = max(GRID_CELL_W, (avail - s * 2 * cols) // cols)
+        new_size = QSize(cell_w, cell_w)   # square
+        if self.gridSize() != new_size:
+            self.setGridSize(new_size)
         if self.spacing() != s:
             self.setSpacing(s)
 
@@ -319,9 +342,11 @@ class GridItemDelegate(QStyledItemDelegate):
                          Qt.AspectRatioMode.KeepAspectRatio,
                          Qt.TransformationMode.SmoothTransformation)
 
-    def paint(self, painter: QPainter, option: QStyleOptionViewItem,
+    def paint(self, painter: QPainter | None, option: QStyleOptionViewItem,
               index: QModelIndex) -> None:
-        game: Game | None = index.data(GameListModel.GAME_ROLE)
+        if painter is None:
+            return
+        game: Optional[Game] = index.data(GameListModel.GAME_ROLE)
         if not game:
             super().paint(painter, option, index)
             return
@@ -396,10 +421,25 @@ class GridItemDelegate(QStyledItemDelegate):
         painter.setPen(QPen(QColor(t.bg_panel), 1.5))
         painter.drawEllipse(rect.right() - 13, rect.top() + 5, 8, 8)
 
+        # ── Favorite star (top-left, inside the header pad) ──────────────────
+        if bool(index.data(GameListModel.FAVORITE_ROLE)):
+            painter.setBrush(Qt.BrushStyle.NoBrush)
+            painter.setPen(QColor("#ffd700"))
+            star_font = QFont()
+            star_font.setPixelSize(12)
+            painter.setFont(star_font)
+            painter.drawText(rect.left() + 3, rect.top() + 2, 14, 14,
+                             Qt.AlignmentFlag.AlignCenter, "★")
+
         painter.restore()
 
     def sizeHint(self, option: QStyleOptionViewItem, index: QModelIndex) -> QSize:
         return QSize(GRID_CELL_W, GRID_CELL_W)   # square
+
+
+_SHOW_ALL       = 0
+_SHOW_INSTALLED = 1
+_SHOW_FAVORITES = 2
 
 
 class GameFilterProxyModel(QSortFilterProxyModel):
@@ -407,7 +447,8 @@ class GameFilterProxyModel(QSortFilterProxyModel):
         super().__init__(parent)
         self._genre_filter    = ""
         self._year_filter     = 0
-        self._installed_only  = False
+        self._show_mode       = _SHOW_ALL   # 0=all, 1=installed, 2=favorites
+        self._favorites: set[str] = set()
         self._preset_field    = ""   # "series" | "source" | ""
         self._preset_value    = ""   # substring to match
         self._rating_filter   = ""
@@ -421,9 +462,14 @@ class GameFilterProxyModel(QSortFilterProxyModel):
         self._year_filter = year
         self.invalidateFilter()
 
-    def set_installed_only(self, installed_only: bool) -> None:
-        self._installed_only = installed_only
+    def set_show_mode(self, mode: int) -> None:
+        self._show_mode = mode
         self.invalidateFilter()
+
+    def set_favorites(self, favorites: set[str]) -> None:
+        self._favorites = favorites
+        if self._show_mode == _SHOW_FAVORITES:
+            self.invalidateFilter()
 
     def set_preset(self, name: str) -> None:
         field, value = _PRESET_MAP.get(name, ("", ""))
@@ -440,11 +486,15 @@ class GameFilterProxyModel(QSortFilterProxyModel):
         self.invalidateFilter()
 
     def filterAcceptsRow(self, source_row: int, source_parent: QModelIndex) -> bool:
-        model: GameListModel = self.sourceModel()
+        model = self.sourceModel()
+        if not isinstance(model, GameListModel):
+            return False
         game = model.game_at(source_row)
         if not game:
             return False
-        if self._installed_only and not game.installed:
+        if self._show_mode == _SHOW_INSTALLED and not game.installed:
+            return False
+        if self._show_mode == _SHOW_FAVORITES and game.id not in self._favorites:
             return False
         if self._genre_filter and self._genre_filter not in game.genre.lower():
             return False
@@ -477,16 +527,19 @@ class GameListPanel(QWidget):
     """
     Left-side panel: search bar + filter combos + the game list view.
     Emits *game_selected* when the user clicks a game.
+    Emits *favorite_toggled(game_id)* when the star button is clicked.
     """
 
-    game_selected = pyqtSignal(object)  # Game
+    game_selected    = pyqtSignal(object)  # Game
+    favorite_toggled = pyqtSignal(str)     # game_id
 
     def __init__(self, library: GameLibrary, image_cache: ImageCache,
                  exodos_root: str, parent=None):
         super().__init__(parent)
-        self._library    = library
-        self._cache      = image_cache
-        self._fallback   = os.path.join(exodos_root, "eXo", "util", "exodos.png")
+        self._library          = library
+        self._cache            = image_cache
+        self._fallback         = os.path.join(exodos_root, "eXo", "util", "exodos.png")
+        self._favorites: set[str] = set()
 
         self._source_model = GameListModel()
         self._proxy_model  = GameFilterProxyModel()
@@ -532,7 +585,7 @@ class GameListPanel(QWidget):
             btn.setFixedSize(28, 28)
             btn.setCheckable(True)
             btn.setToolTip(tip)
-            btn.clicked.connect(lambda checked, m=mode: self._switch_view(m))
+            btn.clicked.connect(lambda _, m=mode: self._switch_view(m))
             self._view_btns.append(btn)
             search_row.addWidget(btn)
         self._view_btns[VIEW_LIST].setChecked(True)
@@ -581,13 +634,13 @@ class GameListPanel(QWidget):
         row2.addWidget(self._play_mode_combo, 2)
         layout.addLayout(row2)
 
-        # ── Installed toggle ───────────────────────────────────────────────
+        # ── Installed / Favorites toggle ───────────────────────────────────
         row3 = QHBoxLayout()
         self._show_label = QLabel("Show:")
         self._show_label.setStyleSheet("font-size:11px;")
         row3.addWidget(self._show_label)
         self._installed_combo = QComboBox()
-        self._installed_combo.addItems(["All games", "Installed only"])
+        self._installed_combo.addItems(["All games", "Installed only", "Favorites only"])
         self._installed_combo.currentIndexChanged.connect(self._on_installed_filter)
         row3.addWidget(self._installed_combo, 1)
         layout.addLayout(row3)
@@ -650,7 +703,6 @@ class GameListPanel(QWidget):
                       self._rating_combo, self._play_mode_combo,
                       self._installed_combo):
             combo.setStyleSheet(combo_qss)
-
         # "Show:" label
         self._show_label.setStyleSheet(f"color:{t.text_lo}; font-size:11px;")
 
@@ -690,10 +742,13 @@ class GameListPanel(QWidget):
                 child.setStyleSheet(tree_qss)
 
         # Trigger repaint of visible view
-        self._list_view.viewport().update()
-        self._grid_view.viewport().update()
+        if vp := self._list_view.viewport():
+            vp.update()
+        if vp := self._grid_view.viewport():
+            vp.update()
         if self._table_view:
-            self._table_view.viewport().update()
+            if vp := self._table_view.viewport():
+                vp.update()
 
     @staticmethod
     def _combo_style(t=None) -> str:
@@ -750,8 +805,9 @@ class GameListPanel(QWidget):
         self._table_view.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
 
         hdr = self._table_view.header()
-        hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
-        hdr.setStretchLastSection(True)
+        if hdr:
+            hdr.setSectionResizeMode(QHeaderView.ResizeMode.Interactive)
+            hdr.setStretchLastSection(True)
         # Sensible default column widths
         self._table_view.setColumnWidth(0, 300)   # Title
         self._table_view.setColumnWidth(1, 55)    # Year
@@ -812,7 +868,7 @@ class GameListPanel(QWidget):
 
     # ── slots ─────────────────────────────────────────────────────────────────
 
-    def _on_search(self, text: str) -> None:
+    def _on_search(self, _text: str) -> None:
         self._search_timer.start()  # restart — fires 150 ms after typing stops
 
     def _apply_search_filter(self) -> None:
@@ -846,7 +902,7 @@ class GameListPanel(QWidget):
         self._update_count()
 
     def _on_installed_filter(self, idx: int) -> None:
-        self._proxy_model.set_installed_only(idx == 1)
+        self._proxy_model.set_show_mode(idx)
         self._update_count()
 
     def _on_selection_changed(self, current: QModelIndex, _previous: QModelIndex) -> None:
@@ -855,7 +911,7 @@ class GameListPanel(QWidget):
         if game:
             self.game_selected.emit(game)
 
-    def _on_image_ready(self, path: str, _pm: QPixmap) -> None:
+    def _on_image_ready(self, _path: str, _pm: QPixmap) -> None:
         views = [self._list_view, self._grid_view, self._table_view]
         views[self._view_stack.currentIndex()].viewport().update()
 
@@ -871,6 +927,12 @@ class GameListPanel(QWidget):
     def refresh(self) -> None:
         self._source_model.set_games(self._library.games)
         self._update_count()
+
+    def set_favorites(self, favorites: set[str]) -> None:
+        """Update the favorites set (call after toggle or project switch)."""
+        self._favorites = favorites
+        self._source_model.set_favorites(favorites)
+        self._proxy_model.set_favorites(favorites)
 
     def set_library(self, library) -> None:
         """Swap in a new library (e.g. when switching projects) and repopulate."""

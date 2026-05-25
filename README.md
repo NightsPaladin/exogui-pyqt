@@ -3,14 +3,26 @@
 > **Unofficial** — This is a personal project and is not affiliated with, endorsed by,
 > or supported by the eXoDOS project or the retro-exo.com team.
 
-A Python/PyQt6 GUI launcher for the [eXoDOS](https://www.retro-exo.com/) MS-DOS game collection and the eXoWin3x Windows 3.x collection.  
+A Python/PyQt6 GUI launcher for the full suite of [eXo](https://www.retro-exo.com/) retro game collections:
+
+| Collection | Platform |
+|------------|----------|
+| **eXoDOS** | MS-DOS |
+| **eXoWin3x** | Windows 3.x |
+| **eXoScummVM** | ScummVM adventure games |
+| **eXoWin9x** | Windows 9x |
+| **eXoAppleIIGS** | Apple IIgs |
+| **eXoDREAMM** | LucasArts classics via DREAMM |
+| **eXoDemoScene** | Demo scene productions |
+| **eXoIF** | Interactive Fiction |
+
 Primarily developed and tested on **macOS**. Linux is supported but has received only minimal testing — bug reports welcome.
 
 ---
 
 ## Features
 
-- **Multi-collection support** — eXoDOS and eXoWin3x, each with independent settings
+- **Multi-collection support** — all eight eXo collections, each with independent settings
 - **Browse 7,000+ games** with instant search and multi-filter support
 - **Three view modes** — List, Grid (box-art thumbnails), and Table
 - **Game detail panel** — box art, description, media gallery, music, videos, documents
@@ -28,8 +40,8 @@ Primarily developed and tested on **macOS**. Linux is supported but has received
 
 - Python 3.10 or newer
 - PyQt6 (`pip install PyQt6`)
-- [eXoDOS](https://www.retro-exo.com/) and/or eXoWin3x collection
-- dosbox-staging and/or dosbox-x installed on your system
+- One or more [eXo collections](https://www.retro-exo.com/) (eXoDOS, eXoWin3x, eXoScummVM, eXoWin9x, eXoAppleIIGS, eXoDREAMM, eXoDemoScene, eXoIF)
+- The appropriate emulator(s) installed for your collections (dosbox-staging, dosbox-x, scummvm, etc.)
 - **aria2c** *(optional — required for Lite mode torrent downloads)*
 
 ---
@@ -81,7 +93,9 @@ Open **File → Settings** and configure each collection:
 | **dosbox-ece** | Path or command for DOSBox ECE |
 | **scummvm** | Usually `scummvm` |
 
-You can add multiple projects (eXoDOS + eXoWin3x simultaneously) using the **+ Add** button.
+You can add multiple collections simultaneously using the **+ Add** button. Each collection is shown as its own tab.
+
+> **Note:** The screenshots below are generated from the app's real PyQt widgets using fictional game data and media, with lightweight platform-specific window chrome added for presentation. They do not reflect any actual content from the eXo collections.
 
 | macOS | Linux |
 |-------|-------|
@@ -160,7 +174,7 @@ system shortcuts listed above are affected.
 exogui-pyqt/
 ├── main.py              Entry point
 ├── core/
-│   ├── project.py       ProjectConfig dataclass; built-in EXODOS and EXOWIN3X configs
+│   ├── project.py       ProjectConfig dataclass; built-in configs for all eight eXo collections
 │   ├── aria_index.py    Torrent index parser and aria2c command builder
 │   ├── game_library.py  XML parser and game model
 │   ├── image_cache.py   Async image/video-thumb loader
@@ -171,7 +185,8 @@ exogui-pyqt/
 │   ├── flow_layout.py   Wrapping flow layout widget
 │   ├── game_detail.py   Right panel — art, metadata, media, extras
 │   ├── game_list.py     Left panel — list/grid/table views + filters
-│   ├── main_window.py   Main window, menu bar, settings dialog
+│   ├── main_window.py   Main window, menu bar, settings dialog, parental controls
+│   ├── pin_dialog.py    Parental control PIN helpers and dialogs
 │   └── themes.py        Theme loader and switcher
 └── themes/
     ├── README.md        Custom theme authoring guide
@@ -202,4 +217,4 @@ You can override the emulator command names in **File → Settings**.
 ## License
 
 eXoGUI is released under the **MIT License**.  
-eXoDOS and eXoWin3x and their content are the property of The eXo Team — see their documentation for licensing details.
+The eXo collections and their content are the property of The eXo Team — see their documentation for licensing details.
