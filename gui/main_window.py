@@ -12,30 +12,32 @@ from PyQt6.QtCore import Qt, QThread, QTimer, QSettings, QByteArray, pyqtSlot, p
 from PyQt6.QtGui import QKeySequence, QAction, QActionGroup
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
-    QSplitter, QDialog, QDialogButtonBox, QFormLayout,
+    QSplitter, QDialog, QDialogButtonBox, QFormLayout, QComboBox,
     QLineEdit, QLabel, QPushButton, QApplication, QMessageBox,
-    QProgressBar, QComboBox, QFileDialog, QScrollArea,
+    QProgressBar, QFileDialog, QScrollArea,
     QGroupBox, QTabBar, QFrame, QCheckBox,
 )
 
 from core.game_library import GameLibrary, Game
 from core.launcher import Launcher
 from core.image_cache import ImageCache
-from core.project import ProjectConfig, ALL_PROJECTS, detect_project, get_project
-from gui.game_list import GameListPanel, GRID_CELL_W, GRID_MIN_SPACING
+from core.project import ProjectConfig, ALL_PROJECTS, get_project
+from core.favorites import FavoritesStore
+from gui.game_list import GameListPanel
 from gui.game_detail import GameDetailPanel
 from gui import themes
+from gui.pin_dialog import (
+    has_pin, set_pin, clear_pin,
+    is_session_unlocked, unlock_session,
+    is_first_launch, mark_first_launch_done,
+    PinEntryDialog, PinSetupDialog,
+)
 
 
 APP_NAME     = "eXoGUI"
 APP_VERSION  = "0.3.0"
 WINDOW_W     = 1280
 WINDOW_H     = 800
-
-# Default left-panel width: exactly 3 grid columns + their spacing + the 8px scrollbar.
-# This ensures the grid view shows a clean 3-wide layout with no leftover space on the
-# right, matching the list_qss QScrollBar:vertical width defined in game_list.py.
-_LIST_PANEL_DEFAULT_W = 3 * (GRID_CELL_W + 2 * GRID_MIN_SPACING) + 8  # = 602
 
 # Directory that contains the exogui-pyqt/ package (i.e. the drive root layout).
 # All project/ZIP-source paths are stored relative to this so the app is
@@ -76,15 +78,30 @@ class _ProjectRow(QWidget):
     """One row in the Settings > Projects section."""
 
     def __init__(self, project_id: str, root: str,
-                 zip_source_path: str = "", parent=None):
+                 zip_source_path: str = "", torrent_path: str = "",
+                 show_mature: bool = False,
+                 settings: QSettings | None = None,
+                 parent=None):
         super().__init__(parent)
         self.project_id = project_id
+        self._settings = settings
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 2, 0, 2)
         layout.setSpacing(4)
 
-        # ── Row 1: project name, root path, content filter ───────────────────
+        def _sub_label(text: str) -> QLabel:
+            lbl = QLabel(text)
+            lbl.setFixedWidth(96)
+            lbl.setStyleSheet("color:gray; font-size:11px;")
+            return lbl
+
+        def _spacer() -> QWidget:
+            sp = QWidget()
+            sp.setFixedWidth(28)
+            return sp
+
+        # ── Row 1: project name + root path ──────────────────────────────────
         row1 = QHBoxLayout()
         row1.setSpacing(8)
 
@@ -113,10 +130,6 @@ class _ProjectRow(QWidget):
         row2 = QHBoxLayout()
         row2.setSpacing(8)
 
-        zip_label = QLabel("ZIP Source")
-        zip_label.setFixedWidth(96)
-        zip_label.setStyleSheet("color:gray; font-size:11px;")
-
         self._zip_source_edit = QLineEdit(zip_source_path)
         self._zip_source_edit.setPlaceholderText(
             "Optional: folder containing game ZIPs (local drive or NAS)…"
@@ -131,17 +144,73 @@ class _ProjectRow(QWidget):
         browse_zip_btn.setFixedWidth(80)
         browse_zip_btn.clicked.connect(self._browse_zip_source)
 
-        # Spacer to align with remove_btn column above
-        spacer = QWidget()
-        spacer.setFixedWidth(28)  # remove_btn width
-
-        row2.addWidget(zip_label)
+        row2.addWidget(_sub_label("ZIP Source"))
         row2.addWidget(self._zip_source_edit, 1)
         row2.addWidget(browse_zip_btn)
-        row2.addWidget(spacer)
+        row2.addWidget(_spacer())
+
+        # ── Row 3: optional torrent file path ────────────────────────────────
+        row3 = QHBoxLayout()
+        row3.setSpacing(8)
+
+        self._torrent_edit = QLineEdit(torrent_path)
+        self._torrent_edit.setPlaceholderText(
+            "Optional: path to .torrent file for Lite download…"
+        )
+        self._torrent_edit.setToolTip(
+            "Point to the project's .torrent file (e.g. eXoDOS.torrent).\n"
+            "Used by the Lite download to fetch only the metadata subset\n"
+            "(images, XML database, launch scripts) without the game ZIPs."
+        )
+
+        browse_torrent_btn = QPushButton("Browse…")
+        browse_torrent_btn.setFixedWidth(80)
+        browse_torrent_btn.clicked.connect(self._browse_torrent)
+
+        row3.addWidget(_sub_label("Torrent"))
+        row3.addWidget(self._torrent_edit, 1)
+        row3.addWidget(browse_torrent_btn)
+        row3.addWidget(_spacer())
+
+        # ── Row 4: mature-content override (intentionally low-profile) ─────────
+        row4 = QHBoxLayout()
+        row4.setSpacing(8)
+        self._mature_cb = QCheckBox("Include adult/mature titles")
+        self._mature_cb.setChecked(show_mature)
+        self._mature_cb.setStyleSheet("color:gray; font-size:11px;")
+        self._mature_cb.setToolTip(
+            "When unchecked (default), only family-friendly titles are shown\n"
+            "if this collection provides a family-friendly game list.\n"
+            "Check to show all titles including adult/mature content."
+        )
+        row4.addWidget(_sub_label(""))          # indent to align with other rows
+        row4.addWidget(self._mature_cb)
+        row4.addStretch()
+
+        self._mature_cb.clicked.connect(self._on_mature_clicked)
 
         layout.addLayout(row1)
         layout.addLayout(row2)
+        layout.addLayout(row3)
+        layout.addLayout(row4)
+
+    def _on_mature_clicked(self, checked: bool) -> None:
+        if not checked:
+            return  # disabling is always allowed
+        if is_session_unlocked():
+            return  # already verified PIN this session
+        if not self._settings or not has_pin(self._settings):
+            return  # no PIN set — no restriction
+        # Revert the visual tick until PIN is verified
+        self._mature_cb.blockSignals(True)
+        self._mature_cb.setChecked(False)
+        self._mature_cb.blockSignals(False)
+        dlg = PinEntryDialog(self._settings, self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            unlock_session()
+            self._mature_cb.blockSignals(True)
+            self._mature_cb.setChecked(True)
+            self._mature_cb.blockSignals(False)
 
     def _browse_root(self) -> None:
         d = QFileDialog.getExistingDirectory(self, "Select project root", self._root_edit.text())
@@ -155,17 +224,30 @@ class _ProjectRow(QWidget):
         if d:
             self._zip_source_edit.setText(d)
 
+    def _browse_torrent(self) -> None:
+        current = self._torrent_edit.text().strip()
+        start = os.path.dirname(current) if current else os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select torrent file", start, "Torrent files (*.torrent)"
+        )
+        if path:
+            self._torrent_edit.setText(path)
+
     @property
     def root(self) -> str:
         return self._root_edit.text().strip()
 
     @property
-    def xml_mode(self) -> str:
-        return "auto"
+    def show_mature(self) -> bool:
+        return self._mature_cb.isChecked()
 
     @property
     def zip_source_path(self) -> str:
         return self._zip_source_edit.text().strip()
+
+    @property
+    def torrent_path(self) -> str:
+        return self._torrent_edit.text().strip()
 
     @property
     def remove_button(self) -> QPushButton:
@@ -173,6 +255,40 @@ class _ProjectRow(QWidget):
 
 
 # ── emulator helpers ─────────────────────────────────────────────────────────
+
+def _resolve_app_bundle(path: str) -> str:
+    """Resolve a macOS .app bundle to its inner executable.
+
+    Reads Contents/Info.plist → CFBundleExecutable; falls back to the first
+    executable found in Contents/MacOS/.  Non-.app paths pass through unchanged,
+    so bare commands (e.g. 'dosbox-staging') are returned as-is.
+    """
+    if not path or not path.endswith(".app") or not os.path.isdir(path):
+        return path
+    try:
+        import plistlib
+        plist = os.path.join(path, "Contents", "Info.plist")
+        if os.path.isfile(plist):
+            with open(plist, "rb") as f:
+                info = plistlib.load(f)
+            exe_name = info.get("CFBundleExecutable", "")
+            if exe_name:
+                exe_path = os.path.join(path, "Contents", "MacOS", exe_name)
+                if os.path.isfile(exe_path):
+                    return exe_path
+    except Exception:
+        pass
+    # Fallback: first executable found in Contents/MacOS/
+    macos_dir = os.path.join(path, "Contents", "MacOS")
+    if os.path.isdir(macos_dir):
+        candidates = sorted(
+            p for p in (os.path.join(macos_dir, n) for n in os.listdir(macos_dir))
+            if os.path.isfile(p) and os.access(p, os.X_OK)
+        )
+        if candidates:
+            return candidates[0]
+    return path
+
 
 def _default_emulators() -> list[dict]:
     """Return macOS starter emulator entries (Linux uses dosbox_linux.txt directly)."""
@@ -185,8 +301,10 @@ def _default_emulators() -> list[dict]:
 
 
 def _load_emulators_from_settings(settings: QSettings) -> dict[str, str]:
-    """Return {family_name: command} from settings (macOS only).
+    """Return {family_name: resolved_command} from settings (macOS only).
 
+    .app bundle paths are resolved to their inner executable so the launcher
+    receives a plain executable path.  Bare commands pass through unchanged.
     On Linux dosbox_linux.txt already contains full commands, so no overrides
     are needed and an empty dict is returned.
     """
@@ -209,7 +327,10 @@ def _load_emulators_from_settings(settings: QSettings) -> dict[str, str]:
             entries = json.loads(raw)
         except (json.JSONDecodeError, TypeError):
             entries = []
-    return {e["name"]: e.get("command", "") for e in entries if e.get("name")}
+    return {
+        e["name"]: _resolve_app_bundle(e.get("command", ""))
+        for e in entries if e.get("name")
+    }
 
 
 # ── per-emulator row widget ───────────────────────────────────────────────────
@@ -237,11 +358,12 @@ class _EmulatorRow(QWidget):
         )
 
         self._command_edit = QLineEdit(command)
-        self._command_edit.setPlaceholderText("executable path or bare command…")
+        self._command_edit.setPlaceholderText(".app bundle or bare command if on PATH…")
         self._command_edit.setToolTip(
-            "Full path to the binary inside a .app bundle, e.g.\n"
-            "  /Applications/DOSBox-Staging.app/Contents/MacOS/dosbox-staging\n"
-            "or a bare command if it is on your PATH, e.g.\n"
+            "Point to the .app bundle in /Applications, e.g.\n"
+            "  /Applications/DOSBox-Staging.app\n"
+            "The executable inside the bundle is found automatically.\n\n"
+            "Or type a bare command if it is on your PATH, e.g.\n"
             "  dosbox-staging"
         )
 
@@ -259,11 +381,19 @@ class _EmulatorRow(QWidget):
         layout.addWidget(self._remove_btn)
 
     def _browse(self) -> None:
-        # DontUseNativeDialog lets Qt navigate inside macOS .app bundles.
-        path, _ = QFileDialog.getOpenFileName(
-            self, "Select emulator executable",
-            self._command_edit.text() or os.path.expanduser("~"),
-            options=QFileDialog.Option.DontUseNativeDialog,
+        current = self._command_edit.text().strip()
+        # Start in the bundle's parent dir; default to /Applications on macOS
+        start = (
+            os.path.dirname(current) if current and os.path.exists(current)
+            else "/Applications" if sys.platform == "darwin"
+            else os.path.expanduser("~")
+        )
+        # DontUseNativeDialog + ShowDirsOnly lets the user select a .app bundle
+        # (which is a directory) without Qt trying to open it as an application.
+        path = QFileDialog.getExistingDirectory(
+            self, "Select .app bundle",
+            start,
+            QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
             self._command_edit.setText(path)
@@ -279,6 +409,192 @@ class _EmulatorRow(QWidget):
     @property
     def remove_button(self) -> QPushButton:
         return self._remove_btn
+
+
+# ── add-project dialog ────────────────────────────────────────────────────────
+
+class _AddProjectDialog(QDialog):
+    """Pick a known eXo project, choose where to install it, and optionally
+    configure the torrent and ZIP-source paths up front."""
+
+    def __init__(self, existing_ids: list[str], default_parent: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Add eXo Project")
+        self.setMinimumWidth(540)
+
+        self._available = [p for p in ALL_PROJECTS if p.id not in existing_ids]
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        # ── Main form ─────────────────────────────────────────────────────────
+        form = QFormLayout()
+        form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        form.setSpacing(8)
+
+        self._combo = QComboBox()
+        for p in self._available:
+            self._combo.addItem(p.display_name, p.id)
+        form.addRow("Project:", self._combo)
+
+        parent_w = QWidget()
+        parent_row = QHBoxLayout(parent_w)
+        parent_row.setContentsMargins(0, 0, 0, 0)
+        parent_row.setSpacing(6)
+        self._parent_edit = QLineEdit(default_parent)
+        self._parent_edit.setPlaceholderText("Directory to install into…")
+        browse_parent = QPushButton("Browse…")
+        browse_parent.setFixedWidth(80)
+        browse_parent.clicked.connect(self._browse_parent)
+        parent_row.addWidget(self._parent_edit, 1)
+        parent_row.addWidget(browse_parent)
+        form.addRow("Install in:", parent_w)
+
+        self._folder_edit = QLineEdit()
+        self._folder_edit.setToolTip(
+            "Folder name that will be created inside the install location.\n"
+            "Pre-filled from the project's torrent name — edit if you need."
+        )
+        form.addRow("Folder name:", self._folder_edit)
+
+        self._path_label = QLabel()
+        self._path_label.setStyleSheet("color: gray; font-size: 11px;")
+        self._path_label.setWordWrap(True)
+        form.addRow("Full path:", self._path_label)
+
+        layout.addLayout(form)
+
+        # ── Optional section ──────────────────────────────────────────────────
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+
+        opt_label = QLabel("Optional — can be configured later in Settings:")
+        opt_label.setStyleSheet("color: gray; font-size: 11px;")
+        layout.addWidget(opt_label)
+
+        opt_form = QFormLayout()
+        opt_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        opt_form.setSpacing(8)
+
+        torrent_w = QWidget()
+        torrent_row = QHBoxLayout(torrent_w)
+        torrent_row.setContentsMargins(0, 0, 0, 0)
+        torrent_row.setSpacing(6)
+        self._torrent_edit = QLineEdit()
+        self._torrent_edit.setPlaceholderText("Path to .torrent file…")
+        browse_torrent = QPushButton("Browse…")
+        browse_torrent.setFixedWidth(80)
+        browse_torrent.clicked.connect(self._browse_torrent)
+        torrent_row.addWidget(self._torrent_edit, 1)
+        torrent_row.addWidget(browse_torrent)
+        opt_form.addRow("Torrent:", torrent_w)
+
+        zip_w = QWidget()
+        zip_row = QHBoxLayout(zip_w)
+        zip_row.setContentsMargins(0, 0, 0, 0)
+        zip_row.setSpacing(6)
+        self._zip_edit = QLineEdit()
+        self._zip_edit.setPlaceholderText("Folder containing game ZIPs (Lite mode)…")
+        browse_zip = QPushButton("Browse…")
+        browse_zip.setFixedWidth(80)
+        browse_zip.clicked.connect(self._browse_zip)
+        zip_row.addWidget(self._zip_edit, 1)
+        zip_row.addWidget(browse_zip)
+        opt_form.addRow("ZIP source:", zip_w)
+
+        layout.addLayout(opt_form)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel
+        )
+        buttons.accepted.connect(self._on_accept)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+        # Wire live updates
+        self._combo.currentIndexChanged.connect(self._on_project_changed)
+        self._parent_edit.textChanged.connect(self._update_path)
+        self._folder_edit.textChanged.connect(self._update_path)
+
+        self._on_project_changed(0)
+
+    # ── internal ──────────────────────────────────────────────────────────────
+
+    def _on_project_changed(self, idx: int) -> None:
+        if 0 <= idx < len(self._available):
+            cfg = self._available[idx]
+            folder = cfg.torrent_name.removesuffix(".torrent") or cfg.display_name
+            self._folder_edit.setText(folder)
+        self._update_path()
+
+    def _update_path(self) -> None:
+        parent = self._parent_edit.text().strip()
+        folder = self._folder_edit.text().strip()
+        self._path_label.setText(os.path.join(parent, folder) if parent and folder
+                                 else parent or folder)
+
+    def _browse_parent(self) -> None:
+        current = self._parent_edit.text().strip()
+        start = current if current and os.path.isdir(current) else os.path.expanduser("~")
+        d = QFileDialog.getExistingDirectory(self, "Select install location", start)
+        if d:
+            self._parent_edit.setText(d)
+
+    def _browse_torrent(self) -> None:
+        current = self._torrent_edit.text().strip()
+        start = os.path.dirname(current) if current else os.path.expanduser("~")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Select torrent file", start, "Torrent files (*.torrent)"
+        )
+        if path:
+            self._torrent_edit.setText(path)
+
+    def _browse_zip(self) -> None:
+        current = self._zip_edit.text().strip()
+        start = current if current and os.path.isdir(current) else os.path.expanduser("~")
+        d = QFileDialog.getExistingDirectory(self, "Select ZIP source folder", start)
+        if d:
+            self._zip_edit.setText(d)
+
+    def _on_accept(self) -> None:
+        parent = self._parent_edit.text().strip()
+        folder = self._folder_edit.text().strip()
+        if not parent or not folder:
+            QMessageBox.warning(
+                self, "Missing path",
+                "Please specify both an install location and a folder name."
+            )
+            return
+        full = os.path.join(parent, folder)
+        try:
+            os.makedirs(full, exist_ok=True)
+        except OSError as exc:
+            QMessageBox.critical(
+                self, "Cannot create directory",
+                f"Could not create:\n{full}\n\n{exc}"
+            )
+            return
+        self.accept()
+
+    # ── properties ────────────────────────────────────────────────────────────
+
+    @property
+    def selected_project_id(self) -> str:
+        idx = self._combo.currentIndex()
+        return self._available[idx].id if 0 <= idx < len(self._available) else ""
+
+    @property
+    def root_path(self) -> str:
+        return os.path.join(self._parent_edit.text().strip(), self._folder_edit.text().strip())
+
+    @property
+    def torrent_path(self) -> str:
+        return self._torrent_edit.text().strip()
+
+    @property
+    def zip_source_path(self) -> str:
+        return self._zip_edit.text().strip()
 
 
 # ── settings dialog ───────────────────────────────────────────────────────────
@@ -340,10 +656,14 @@ class SettingsDialog(QDialog):
             projects = []
         for p in projects:
             zsp = settings.value(f"project_{p['id']}/zip_source_path", "")
+            tp  = settings.value(f"project_{p['id']}/torrent_path", "")
+            mature = settings.value(f"project_{p['id']}/show_mature", False, type=bool)
             self._add_row(
                 p["id"],
                 _from_stored_path(p.get("root", "")),
                 _from_stored_path(zsp),
+                _from_stored_path(tp),
+                show_mature=mature,
             )
 
         add_btn = QPushButton("＋  Add Project…")
@@ -423,6 +743,24 @@ class SettingsDialog(QDialog):
 
             outer.addWidget(emu_box)
 
+        # ── Parental Controls ─────────────────────────────────────────────────
+        pc_box = QGroupBox("Parental Controls")
+        pc_layout = QHBoxLayout(pc_box)
+        self._pin_status_lbl = QLabel()
+        pc_layout.addWidget(self._pin_status_lbl)
+        pc_layout.addStretch()
+        self._set_pin_btn    = QPushButton("Set PIN…")
+        self._change_pin_btn = QPushButton("Change PIN…")
+        self._remove_pin_btn = QPushButton("Remove PIN…")
+        self._set_pin_btn.clicked.connect(self._do_set_pin)
+        self._change_pin_btn.clicked.connect(self._do_change_pin)
+        self._remove_pin_btn.clicked.connect(self._do_remove_pin)
+        pc_layout.addWidget(self._set_pin_btn)
+        pc_layout.addWidget(self._change_pin_btn)
+        pc_layout.addWidget(self._remove_pin_btn)
+        outer.addWidget(pc_box)
+        self._refresh_pin_ui()
+
         # ── Playback Options ──────────────────────────────────────────────────
         playback_box = QGroupBox("Playback")
         playback_layout = QVBoxLayout(playback_box)
@@ -459,8 +797,10 @@ class SettingsDialog(QDialog):
         self._add_emu_row("", "")
 
     def _add_row(self, project_id: str, root: str,
-                 zip_source_path: str = "") -> None:
-        row = _ProjectRow(project_id, root, zip_source_path, self)
+                 zip_source_path: str = "", torrent_path: str = "",
+                 show_mature: bool = False) -> None:
+        row = _ProjectRow(project_id, root, zip_source_path, torrent_path,
+                          show_mature, self._settings, self)
         row.remove_button.clicked.connect(lambda: self._remove_row(row))
         idx = self._rows_layout.count() - 1   # insert before stretch
         self._rows_layout.insertWidget(idx, row)
@@ -472,25 +812,73 @@ class SettingsDialog(QDialog):
         self._project_rows.remove(row)
 
     def _add_project(self) -> None:
-        d = QFileDialog.getExistingDirectory(self, "Select project root")
-        if not d:
-            return
-        cfg = detect_project(d)
-        if cfg is None:
-            QMessageBox.warning(
-                self, "Unknown project",
-                f"Could not detect an eXo project at:\n{d}\n\n"
-                "Make sure this is the root of an eXoDOS or eXoWin3x installation."
+        existing_ids = [row.project_id for row in self._project_rows]
+        available = [p for p in ALL_PROJECTS if p.id not in existing_ids]
+        if not available:
+            QMessageBox.information(
+                self, "All projects added",
+                "All known eXo projects are already in the list."
             )
             return
+
+        # Default parent: parent dir of the first configured project row
+        default_parent = ""
         for row in self._project_rows:
-            if row.project_id == cfg.id:
-                QMessageBox.information(
-                    self, "Already added",
-                    f"{cfg.display_name} is already in the projects list."
-                )
-                return
-        self._add_row(cfg.id, d)
+            if row.root:
+                candidate = os.path.dirname(row.root)
+                if os.path.isdir(candidate):
+                    default_parent = candidate
+                    break
+        if not default_parent:
+            default_parent = os.path.expanduser("~")
+
+        dlg = _AddProjectDialog(existing_ids, default_parent, self)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._add_row(dlg.selected_project_id, dlg.root_path, dlg.zip_source_path, dlg.torrent_path)
+
+    def _refresh_pin_ui(self) -> None:
+        if has_pin(self._settings):
+            self._pin_status_lbl.setText("PIN protection: <b>Enabled</b>")
+            self._set_pin_btn.setVisible(False)
+            self._change_pin_btn.setVisible(True)
+            self._remove_pin_btn.setVisible(True)
+        else:
+            self._pin_status_lbl.setText("PIN protection: <b>Not set</b>  — adult-content setting is unprotected")
+            self._set_pin_btn.setVisible(True)
+            self._change_pin_btn.setVisible(False)
+            self._remove_pin_btn.setVisible(False)
+
+    def _do_set_pin(self) -> None:
+        dlg = PinSetupDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            set_pin(self._settings, dlg.pin)
+            unlock_session()
+            self._refresh_pin_ui()
+
+    def _do_change_pin(self) -> None:
+        verify = PinEntryDialog(self._settings, self)
+        if verify.exec() != QDialog.DialogCode.Accepted:
+            return
+        unlock_session()
+        dlg = PinSetupDialog(self)
+        if dlg.exec() == QDialog.DialogCode.Accepted:
+            set_pin(self._settings, dlg.pin)
+            self._refresh_pin_ui()
+
+    def _do_remove_pin(self) -> None:
+        verify = PinEntryDialog(self._settings, self)
+        if verify.exec() != QDialog.DialogCode.Accepted:
+            return
+        ans = QMessageBox.question(
+            self, "Remove PIN",
+            "Remove the parental control PIN?\n"
+            "The adult-content setting will be unprotected.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            clear_pin(self._settings)
+            self._refresh_pin_ui()
 
     def _save(self) -> None:
         projects = [
@@ -502,6 +890,14 @@ class SettingsDialog(QDialog):
             self._settings.setValue(
                 f"project_{row.project_id}/zip_source_path",
                 _to_stored_path(row.zip_source_path),
+            )
+            self._settings.setValue(
+                f"project_{row.project_id}/torrent_path",
+                _to_stored_path(row.torrent_path),
+            )
+            self._settings.setValue(
+                f"project_{row.project_id}/show_mature",
+                row.show_mature,
             )
         emulators = [
             {"name": r.name, "command": r.command}
@@ -573,8 +969,8 @@ class _LibraryLoaderThread(QThread):
     on failure.  parent should be the MainWindow so Qt owns the lifetime.
     """
 
-    finished: pyqtSignal = pyqtSignal(object, str)   # (GameLibrary, project_id)
-    error:    pyqtSignal = pyqtSignal(str,    str)    # (message,     project_id)
+    loaded:     pyqtSignal = pyqtSignal(object, str)   # (GameLibrary, project_id)
+    load_error: pyqtSignal = pyqtSignal(str,    str)    # (message,     project_id)
 
     def __init__(self, library, project_id: str, force_reload: bool = False, parent=None):
         super().__init__(parent)
@@ -585,9 +981,9 @@ class _LibraryLoaderThread(QThread):
     def run(self) -> None:
         try:
             self._library.load(force_reload=self._force_reload)
-            self.finished.emit(self._library, self._project_id)
+            self.loaded.emit(self._library, self._project_id)
         except Exception as exc:
-            self.error.emit(str(exc), self._project_id)
+            self.load_error.emit(str(exc), self._project_id)
 
 
 # ── main window ───────────────────────────────────────────────────────────────
@@ -614,14 +1010,22 @@ class MainWindow(QMainWindow):
         if not any(p["id"] == self._active_id for p in self._projects):
             self._active_id = default_id
 
+        try:
+            _fav_raw = self._settings.value("favorites", "{}")
+            _fav_data = json.loads(_fav_raw) if _fav_raw else {}
+        except (json.JSONDecodeError, TypeError):
+            _fav_data = {}
+        self._favorites_store = FavoritesStore(_fav_data)
         self._libraries: dict[str, GameLibrary] = {}
         self._launchers: dict[str, Launcher]    = {}
 
-        self.setWindowTitle(f"{APP_NAME}  v{APP_VERSION}")
+        self.setWindowTitle(f"{APP_NAME} (Qt)")
         self.resize(WINDOW_W, WINDOW_H)
 
         saved_theme = self._settings.value("theme", "System")
-        themes.set_theme(saved_theme, QApplication.instance())
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)
+        themes.set_theme(saved_theme, app)
 
         geom: QByteArray | None = self._settings.value("window/geometry")
         if geom:
@@ -635,7 +1039,26 @@ class MainWindow(QMainWindow):
         self._build_menu()
         self._build_status_bar()
 
+        QTimer.singleShot(0,   self._check_first_launch)
         QTimer.singleShot(100, self._load_active_project)
+
+    def _check_first_launch(self) -> None:
+        if not is_first_launch(self._settings):
+            return
+        mark_first_launch_done(self._settings)
+        ans = QMessageBox.question(
+            self, "Set Up Parental Controls",
+            "eXoGUI defaults to family-friendly titles only.\n\n"
+            "Would you like to set a 4-digit PIN to protect the\n"
+            "adult-content setting? Children won't be able to enable\n"
+            "adult titles without this PIN.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans == QMessageBox.StandardButton.Yes:
+            dlg = PinSetupDialog(self)
+            if dlg.exec() == QDialog.DialogCode.Accepted:
+                set_pin(self._settings, dlg.pin)
+                unlock_session()
 
     # ── settings migration ────────────────────────────────────────────────────
 
@@ -666,7 +1089,15 @@ class MainWindow(QMainWindow):
         cfg, root = self._project_entry(project_id)
         if not cfg or not root:
             return None
-        xml_mode = "auto"
+        show_mature = self._settings.value(
+            f"project_{project_id}/show_mature", False, type=bool
+        )
+        if show_mature or "family" not in cfg.xml_variants:
+            xml_mode = "auto"
+        elif os.path.exists(cfg.xml_path(root, "family")):
+            xml_mode = "family"
+        else:
+            xml_mode = "auto"
         return GameLibrary(root, xml_mode=xml_mode, config=cfg)
 
     def _make_launcher(self, project_id: str) -> Launcher | None:
@@ -676,8 +1107,12 @@ class MainWindow(QMainWindow):
         zip_source = _from_stored_path(
             self._settings.value(f"project_{project_id}/zip_source_path", "")
         )
+        torrent_path = _from_stored_path(
+            self._settings.value(f"project_{project_id}/torrent_path", "")
+        )
         emulators = _load_emulators_from_settings(self._settings)
         return Launcher(root, config=cfg, zip_source_path=zip_source,
+                        torrent_path=torrent_path,
                         emulators=emulators, parent=self)
 
     def _connect_launcher(self, launcher: Launcher) -> None:
@@ -691,6 +1126,16 @@ class MainWindow(QMainWindow):
         launcher.fetch_progress.connect(self._on_fetch_progress)
         launcher.fetch_finished.connect(self._on_fetch_finished)
         launcher.fetch_cancelled.connect(self._on_fetch_cancelled)
+        launcher.lite_phase.connect(self._on_lite_phase)
+        launcher.lite_progress.connect(self._on_lite_progress)
+        launcher.lite_finished.connect(self._on_lite_finished)
+        launcher.lite_cancelled.connect(self._on_lite_cancelled)
+
+    def _torrent_path_for(self, project_id: str) -> str:
+        """Return the configured torrent file path for a project, resolved to absolute."""
+        return _from_stored_path(
+            self._settings.value(f"project_{project_id}/torrent_path", "")
+        )
 
     @property
     def _library(self) -> GameLibrary | None:
@@ -710,7 +1155,7 @@ class MainWindow(QMainWindow):
         if not self._active_id:
             self._active_id = self._projects[0]["id"]
 
-        cfg, root = self._project_entry(self._active_id)
+        cfg, _ = self._project_entry(self._active_id)
         display = cfg.display_name if cfg else self._active_id
         self._loading.set_label(f"Loading {display}…")
         self._loading.set_status("Parsing catalogue…")
@@ -724,11 +1169,31 @@ class MainWindow(QMainWindow):
             self._show_no_project_ui()
             return
 
-        self._loader = _LibraryLoaderThread(lib, self._active_id, self)
-        self._loader.finished.connect(self._on_library_loaded)
-        self._loader.error.connect(self._on_library_load_error)
-        self._loader.finished.connect(self._loader.deleteLater)
-        self._loader.error.connect(self._loader.deleteLater)
+        # Offer to extract Content/*.zip if present but not yet unpacked.
+        cfg, root = self._project_entry(self._active_id)
+        if cfg and root and Launcher.needs_content_setup(root, cfg):
+            ans = QMessageBox.question(
+                self,
+                f"Set up {cfg.display_name}?",
+                f"{cfg.display_name} has content archives that haven't been extracted yet.\n\n"
+                "Extract them now? This sets up images, the game catalogue, and "
+                "launch scripts (equivalent to the Windows setup script).",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            )
+            if ans == QMessageBox.StandardButton.Yes:
+                launcher = self._make_launcher(self._active_id)
+                if launcher:
+                    self._connect_launcher(launcher)
+                    self._launchers[self._active_id] = launcher
+                    launcher.setup_collection()
+                    # After setup completes, _on_lite_finished will reload.
+                    return
+
+        self._loader = _LibraryLoaderThread(lib, self._active_id, parent=self)
+        self._loader.loaded.connect(self._on_library_loaded)
+        self._loader.load_error.connect(self._on_library_load_error)
+        self._loader.loaded.connect(self._loader.deleteLater)
+        self._loader.load_error.connect(self._loader.deleteLater)
         self._loader.start()
 
     def _show_no_project_ui(self) -> None:
@@ -770,14 +1235,150 @@ class MainWindow(QMainWindow):
     def _on_library_load_error(self, msg: str, project_id: str) -> None:
         if project_id != self._active_id:
             return
+        self._show_no_library_ui(project_id, msg)
+
+    def _show_no_library_ui(self, project_id: str, msg: str = "") -> None:
+        """Show the 'no library' state with options to fix or run a Lite download."""
         cfg, root = self._project_entry(project_id)
         display = cfg.display_name if cfg else project_id
-        QMessageBox.critical(
-            self, "Error loading library",
-            f"Failed to load {display} catalogue:\n\n{msg}\n\n"
-            f"Check that the root path is correct.\nCurrent path: {root}"
-        )
-        self._show_no_project_ui()
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(12)
+
+        if msg:
+            err_text = (
+                f"Could not load {display} catalogue:\n{msg}\n\n"
+                f"Root path: {root or '(not set)'}"
+            )
+        else:
+            err_text = f"No library found for {display}.\nRoot path: {root or '(not set)'}"
+        err_lbl = QLabel(err_text)
+        err_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        err_lbl.setStyleSheet("font-size:14px;")
+        err_lbl.setWordWrap(True)
+        layout.addWidget(err_lbl)
+
+        settings_btn = QPushButton("Open Settings…")
+        settings_btn.setFixedWidth(180)
+        settings_btn.clicked.connect(self._open_settings)
+        layout.addWidget(settings_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        torrent_path = self._torrent_path_for(project_id)
+        if torrent_path and os.path.isfile(torrent_path):
+            sep = QFrame()
+            sep.setFrameShape(QFrame.Shape.HLine)
+            sep.setFixedWidth(320)
+            layout.addWidget(sep, 0, Qt.AlignmentFlag.AlignCenter)
+
+            lite_lbl = QLabel(
+                "Download the metadata subset (images, XML database, launch scripts)\n"
+                "without the full game ZIPs using the configured torrent file:"
+            )
+            lite_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            lite_lbl.setStyleSheet("font-size:13px; color:gray;")
+            lite_lbl.setWordWrap(True)
+            layout.addWidget(lite_lbl)
+
+            lite_btn = QPushButton(f"Download Lite metadata for {display}…")
+            lite_btn.setFixedWidth(320)
+            lite_btn.clicked.connect(lambda: self._start_lite_download(project_id))
+            layout.addWidget(lite_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self._set_content_page(w)
+
+    def _start_lite_download(self, project_id: str) -> None:
+        """Begin a Lite metadata download for the given project."""
+        torrent_path = self._torrent_path_for(project_id)
+        if not torrent_path or not os.path.isfile(torrent_path):
+            QMessageBox.warning(
+                self, "No torrent configured",
+                "No torrent file found for this project.\n"
+                "Open Settings and set the Torrent path.",
+            )
+            return
+
+        if project_id not in self._launchers:
+            launcher = self._make_launcher(project_id)
+            if launcher is None:
+                QMessageBox.critical(
+                    self, "Error",
+                    "Could not create a launcher for this project.\n"
+                    "Check that the project root path is configured.",
+                )
+                return
+            self._connect_launcher(launcher)
+            self._launchers[project_id] = launcher
+
+        self._lite_project_id = project_id
+        self._show_lite_progress_ui(project_id)
+        if not self._launchers[project_id].download_lite(torrent_path):
+            QMessageBox.warning(
+                self, "Already running",
+                "A Lite download is already in progress.",
+            )
+
+    def _show_lite_progress_ui(self, project_id: str) -> None:
+        """Replace the central widget with the Lite download progress panel."""
+        cfg = get_project(project_id)
+        display = cfg.display_name if cfg else project_id
+
+        w = QWidget()
+        layout = QVBoxLayout(w)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(10)
+
+        title = QLabel(f"Downloading {display} Lite metadata…")
+        title.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title.setStyleSheet("font-size:16px; font-weight:bold;")
+        layout.addWidget(title)
+
+        self._lite_phase_label = QLabel("Starting…")
+        self._lite_phase_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._lite_phase_label.setStyleSheet("font-size:13px; color:gray;")
+        layout.addWidget(self._lite_phase_label)
+
+        self._lite_bar = QProgressBar()
+        self._lite_bar.setRange(0, 0)
+        self._lite_bar.setFixedWidth(420)
+        layout.addWidget(self._lite_bar, 0, Qt.AlignmentFlag.AlignCenter)
+
+        cancel_btn = QPushButton("Cancel")
+        cancel_btn.setFixedWidth(120)
+        cancel_btn.clicked.connect(self._cancel_lite_download)
+        layout.addWidget(cancel_btn, 0, Qt.AlignmentFlag.AlignCenter)
+
+        self._set_content_page(w)
+
+    def _cancel_lite_download(self) -> None:
+        launcher = self._launchers.get(getattr(self, "_lite_project_id", ""))
+        if launcher:
+            launcher.cancel_lite()
+        self._set_status("Cancelling Lite download…")
+
+    def _set_content_page(self, widget: QWidget) -> None:
+        """Swap the content area (below the tab bar) without touching the tab bar.
+
+        If _page_container exists (main UI built), replaces its contents in-place
+        so the tab bar is preserved.  Before the main UI is built, falls back to
+        setCentralWidget so the initial loading/error states still work.
+        """
+        if hasattr(self, "_page_container"):
+            layout = self._page_container.layout()
+            assert layout is not None
+            while layout.count():
+                item = layout.takeAt(0)
+                if item is None:
+                    break
+                old = item.widget()
+                if old is not None:
+                    old.hide()
+                    old.setParent(None)   # orphan without deleting
+            layout.addWidget(widget)
+            widget.show()
+        else:
+            self.setCentralWidget(widget)
 
     def _activate_project(self, project_id: str) -> None:
         """Update the existing UI to display a newly loaded (or cached) project."""
@@ -785,16 +1386,21 @@ class MainWindow(QMainWindow):
         _, root = self._project_entry(project_id)
         self._detail_panel._fallback = os.path.join(root, "eXo", "util", "exodos.png")
         self._list_panel.set_library(lib)
+        self._list_panel.set_favorites(self._favorites_store.get_set(project_id))
         total     = len(lib.games)
         installed = len(lib.filter_installed())
         cfg  = get_project(project_id)
         name = cfg.display_name if cfg else project_id
         self._set_status(f"{name}: {total:,} games  ·  {installed:,} installed")
+        self._set_content_page(self._splitter)
 
 
 
     def _build_main_ui(self) -> None:
         lib = self._library
+        if lib is None:
+            self._show_no_project_ui()
+            return
         _, root = self._project_entry(self._active_id)
 
         central = QWidget()
@@ -829,10 +1435,16 @@ class MainWindow(QMainWindow):
         )
 
         self._list_panel.game_selected.connect(self._on_game_selected)
+        self._list_panel.favorite_toggled.connect(self._on_favorite_toggled)
         self._detail_panel.play_requested.connect(self._on_play_requested)
         self._detail_panel.install_requested.connect(self._on_install_requested)
         self._detail_panel.uninstall_requested.connect(self._on_uninstall_requested)
         self._detail_panel.cancel_requested.connect(self._on_cancel_requested)
+        self._detail_panel.favorite_toggled.connect(self._on_favorite_toggled)
+
+        self._list_panel.set_favorites(
+            self._favorites_store.get_set(self._active_id)
+        )
 
         self._splitter.addWidget(self._list_panel)
         self._splitter.addWidget(self._detail_panel)
@@ -842,9 +1454,17 @@ class MainWindow(QMainWindow):
             self._splitter.restoreState(saved_split)
         else:
             w = self.width() or WINDOW_W
-            self._splitter.setSizes([_LIST_PANEL_DEFAULT_W, max(1, w - _LIST_PANEL_DEFAULT_W - self._splitter.handleWidth())])
+            self._splitter.setSizes([w // 2, w // 2])
 
-        outer.addWidget(self._splitter)
+        # _page_container holds the swappable content area (splitter, no-library
+        # message, progress panel, etc.).  It sits below the tab bar so that
+        # swapping pages never destroys the tab bar.
+        self._page_container = QWidget()
+        _pc_layout = QVBoxLayout(self._page_container)
+        _pc_layout.setContentsMargins(0, 0, 0, 0)
+        _pc_layout.setSpacing(0)
+        _pc_layout.addWidget(self._splitter)
+        outer.addWidget(self._page_container)
         self.setCentralWidget(central)
 
         if lib:
@@ -887,19 +1507,45 @@ class MainWindow(QMainWindow):
             )
             return
 
-        self._loader = _LibraryLoaderThread(lib, project_id, self)
-        self._loader.finished.connect(self._on_library_loaded)
-        self._loader.error.connect(self._on_library_load_error)
-        self._loader.finished.connect(self._loader.deleteLater)
-        self._loader.error.connect(self._loader.deleteLater)
+        self._loader = _LibraryLoaderThread(lib, project_id, parent=self)
+        self._loader.loaded.connect(self._on_library_loaded)
+        self._loader.load_error.connect(self._on_library_load_error)
+        self._loader.loaded.connect(self._loader.deleteLater)
+        self._loader.load_error.connect(self._loader.deleteLater)
         self._loader.start()
+
+    def _rerun_setup(self) -> None:
+        """Re-extract Content archives for the active collection (Tools menu)."""
+        cfg, root = self._project_entry(self._active_id)
+        if not cfg or not root:
+            QMessageBox.warning(self, "No collection", "No active collection is configured.")
+            return
+        ans = QMessageBox.question(
+            self,
+            f"Re-setup {cfg.display_name}?",
+            f"Re-extract all Content archives for {cfg.display_name}?\n\n"
+            "This overwrites existing images, catalogue, and launch scripts "
+            "with the versions from the Content archives.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if ans != QMessageBox.StandardButton.Yes:
+            return
+        launcher = self._launchers.get(self._active_id) or self._make_launcher(self._active_id)
+        if not launcher:
+            return
+        if self._active_id not in self._launchers:
+            self._connect_launcher(launcher)
+            self._launchers[self._active_id] = launcher
+        launcher.setup_collection()
 
     # ── menu build ────────────────────────────────────────────────────────────
 
     def _build_menu(self) -> None:
         mb = self.menuBar()
+        assert mb is not None
 
         file_menu = mb.addMenu("File")
+        assert file_menu is not None
         act_settings = QAction("Settings…", self)
         act_settings.setShortcut(QKeySequence.StandardKey.Preferences)
         act_settings.triggered.connect(self._open_settings)
@@ -911,6 +1557,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction(act_quit)
 
         view_menu = mb.addMenu("View")
+        assert view_menu is not None
 
         act_refresh = QAction("Refresh library", self)
         act_refresh.setShortcut(QKeySequence("F5"))
@@ -920,20 +1567,22 @@ class MainWindow(QMainWindow):
         view_menu.addSeparator()
 
         theme_menu = view_menu.addMenu("Theme")
+        assert theme_menu is not None
         self._theme_actions: dict[str, QAction] = {}
         theme_group = QActionGroup(self)
         theme_group.setExclusive(True)
         for tname in themes.THEME_NAMES:
-            act = QAction(tname, self, checkable=True)
+            act = QAction(tname, self)
+            act.setCheckable(True)
             act.setChecked(tname == themes.current_name())
-            act.triggered.connect(lambda checked, n=tname: self._switch_theme(n))
+            act.triggered.connect(lambda _, n=tname: self._switch_theme(n))
             theme_group.addAction(act)
             theme_menu.addAction(act)
             self._theme_actions[tname] = act
 
         view_menu.addSeparator()
 
-        act_reset_splitter = QAction("Reset split to default", self)
+        act_reset_splitter = QAction("Reset split to 50/50", self)
         act_reset_splitter.triggered.connect(self._reset_splitter)
         view_menu.addAction(act_reset_splitter)
 
@@ -941,14 +1590,25 @@ class MainWindow(QMainWindow):
         act_reset_win.triggered.connect(self._reset_window)
         view_menu.addAction(act_reset_win)
 
+        tools_menu = mb.addMenu("Tools")
+        assert tools_menu is not None
+        self._act_setup = QAction("Re-setup Collection…", self)
+        self._act_setup.setToolTip(
+            "Extract Content archives for the active collection,\n"
+            "updating images, game catalogue, and launch scripts."
+        )
+        self._act_setup.triggered.connect(self._rerun_setup)
+        tools_menu.addAction(self._act_setup)
+
         help_menu = mb.addMenu("Help")
+        assert help_menu is not None
         act_about = QAction("About", self)
         act_about.triggered.connect(self._show_about)
         help_menu.addAction(act_about)
 
     def _build_status_bar(self) -> None:
         self._status = self.statusBar()
-        self._status.setContentsMargins(6, 0, 0, 0)
+        assert self._status is not None
         self._status_label = QLabel("Ready")
         self._status.addWidget(self._status_label)
 
@@ -957,7 +1617,20 @@ class MainWindow(QMainWindow):
     @pyqtSlot(object)
     def _on_game_selected(self, game: Game) -> None:
         self._detail_panel.show_game(game)
+        self._detail_panel.set_favorite(
+            self._favorites_store.is_favorite(self._active_id, game.id or "")
+        )
         self._set_status(f"{game.title}  [{game.emulator_display}]")
+
+    @pyqtSlot(str)
+    def _on_favorite_toggled(self, game_id: str) -> None:
+        self._favorites_store.toggle(self._active_id, game_id)
+        self._settings.setValue("favorites", json.dumps(self._favorites_store.to_dict()))
+        new_favs = self._favorites_store.get_set(self._active_id)
+        if hasattr(self, "_list_panel"):
+            self._list_panel.set_favorites(new_favs)
+        if hasattr(self, "_detail_panel"):
+            self._detail_panel.set_favorite(game_id in new_favs)
 
     @pyqtSlot(object)
     def _on_play_requested(self, game: Game) -> None:
@@ -1018,7 +1691,7 @@ class MainWindow(QMainWindow):
         self._set_status(f"Launch failed: {name}")
 
     @pyqtSlot(str, int, int)
-    def _on_install_progress(self, game_id: str, current: int, total: int) -> None:
+    def _on_install_progress(self, _game_id: str, current: int, total: int) -> None:
         self._detail_panel.set_installing(current, total)
 
     @pyqtSlot(str, bool, str)
@@ -1052,12 +1725,12 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(self, "Uninstall error", msg)
 
     @pyqtSlot(str, str)
-    def _on_fetch_phase(self, game_id: str, phase: str) -> None:
+    def _on_fetch_phase(self, _game_id: str, phase: str) -> None:
         self._detail_panel.set_fetch_phase(phase)
         self._set_status(phase)
 
     @pyqtSlot(str, int, int)
-    def _on_fetch_progress(self, game_id: str, current: int, total: int) -> None:
+    def _on_fetch_progress(self, _game_id: str, current: int, total: int) -> None:
         self._detail_panel.set_installing(current, total)
 
     @pyqtSlot(str, bool, str)
@@ -1084,10 +1757,46 @@ class MainWindow(QMainWindow):
         self._detail_panel.set_fetch_cancelled()
         self._set_status(f"Download cancelled: {name}")
 
+    @pyqtSlot(str)
+    def _on_lite_phase(self, phase: str) -> None:
+        if hasattr(self, "_lite_phase_label"):
+            self._lite_phase_label.setText(phase)
+        self._set_status(phase)
+
+    @pyqtSlot(int, int)
+    def _on_lite_progress(self, current: int, total: int) -> None:
+        if hasattr(self, "_lite_bar"):
+            if total > 0:
+                self._lite_bar.setRange(0, total)
+                self._lite_bar.setValue(current)
+            else:
+                self._lite_bar.setRange(0, 0)
+
+    @pyqtSlot(bool, str)
+    def _on_lite_finished(self, success: bool, msg: str) -> None:
+        project_id = getattr(self, "_lite_project_id", self._active_id)
+        if success:
+            self._set_status(f"{msg} Loading library…")
+            self._active_id = project_id
+            self._loading = LoadingWidget(self)
+            self._set_content_page(self._loading)
+            QTimer.singleShot(100, self._load_active_project)
+        else:
+            QMessageBox.critical(self, "Lite download failed", msg)
+            self._show_no_library_ui(project_id, msg)
+
+    @pyqtSlot()
+    def _on_lite_cancelled(self) -> None:
+        project_id = getattr(self, "_lite_project_id", self._active_id)
+        self._set_status("Lite download cancelled.")
+        self._show_no_library_ui(project_id)
+
     # ── menu actions ──────────────────────────────────────────────────────────
 
     def _switch_theme(self, name: str) -> None:
-        themes.set_theme(name, QApplication.instance())
+        app = QApplication.instance()
+        assert isinstance(app, QApplication)
+        themes.set_theme(name, app)
         self._settings.setValue("theme", name)
         for tname, act in self._theme_actions.items():
             act.setChecked(tname == name)
@@ -1099,7 +1808,7 @@ class MainWindow(QMainWindow):
     def _reset_splitter(self) -> None:
         if hasattr(self, "_splitter"):
             w = self._splitter.width() or WINDOW_W
-            self._splitter.setSizes([_LIST_PANEL_DEFAULT_W, max(1, w - _LIST_PANEL_DEFAULT_W - self._splitter.handleWidth())])
+            self._splitter.setSizes([w // 2, w // 2])
             self._settings.remove("window/splitter")
 
     def _reset_window(self) -> None:
@@ -1112,7 +1821,7 @@ class MainWindow(QMainWindow):
             self.move(sg.center() - self.rect().center())
         if hasattr(self, "_splitter"):
             w = self._splitter.width() or WINDOW_W
-            self._splitter.setSizes([_LIST_PANEL_DEFAULT_W, max(1, w - _LIST_PANEL_DEFAULT_W - self._splitter.handleWidth())])
+            self._splitter.setSizes([w // 2, w // 2])
 
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self._settings, self)
@@ -1134,11 +1843,14 @@ class MainWindow(QMainWindow):
             self._active_id = self._projects[0]["id"] if self._projects else ""
 
         if self._projects:
-            # Invalidate stale widget references before replacing the central widget.
-            # Qt deletes child widgets when setCentralWidget is called, so Python
-            # references to _list_panel/_detail_panel/_splitter become dangling.
-            for _attr in ("_list_panel", "_detail_panel", "_splitter"):
+            # Drop all panel references. _splitter may be orphaned (setParent(None)
+            # inside _set_content_page), in which case setCentralWidget won't delete
+            # it — explicit deleteLater ensures it's cleaned up regardless.
+            for _attr in ("_list_panel", "_detail_panel", "_splitter",
+                          "_page_container", "_project_tabs"):
                 if hasattr(self, _attr):
+                    widget_ref = getattr(self, _attr)
+                    widget_ref.deleteLater()
                     delattr(self, _attr)
             self._loading = LoadingWidget(self)
             self.setCentralWidget(self._loading)
@@ -1164,29 +1876,29 @@ class MainWindow(QMainWindow):
             self._set_status(f"Refreshed: {len(refreshed_lib.games):,} games")
 
         self._refresh_loader = _LibraryLoaderThread(lib, project_id, force_reload=True, parent=self)
-        self._refresh_loader.finished.connect(_on_refresh_done)
-        self._refresh_loader.finished.connect(self._refresh_loader.deleteLater)
-        self._refresh_loader.error.connect(self._refresh_loader.deleteLater)
+        self._refresh_loader.loaded.connect(_on_refresh_done)
+        self._refresh_loader.loaded.connect(self._refresh_loader.deleteLater)
+        self._refresh_loader.load_error.connect(self._refresh_loader.deleteLater)
         self._refresh_loader.start()
 
     def _show_about(self) -> None:
         QMessageBox.about(
             self, f"About {APP_NAME}",
-            f"<b>{APP_NAME}</b> v{APP_VERSION}<br><br>"
-            "A Python/PyQt6 GUI launcher for eXo DOS/Windows collections.<br>"
-            "Supports eXoDOS and eXoWin3x independently — no merging required.<br>"
-            "Runs on macOS and Linux with dosbox-staging, dosbox-x, dosbox-ece, "
-            "and ScummVM.<br><br>"
-            "Based on the eXoDOS and eXoWin3x projects by The eXo Team."
+            f"<b>{APP_NAME} (Qt)</b><br>"
+            f"v{APP_VERSION} (alpha)<br><br>"
+            "A Python/PyQt6 GUI launcher for eXo retro-game collections.<br>"
+            "Supports all eXo projects independently — no merging required.<br>"
+            "Runs on macOS and Linux.<br><br>"
+            "Based on the eXo projects by The eXo Team (retro-exo.com)."
         )
 
     # ── window lifecycle ──────────────────────────────────────────────────────
 
-    def closeEvent(self, event) -> None:  # noqa: N802
+    def closeEvent(self, a0) -> None:  # noqa: N802
         self._settings.setValue("window/geometry", self.saveGeometry())
         if hasattr(self, "_splitter"):
             self._settings.setValue("window/splitter", self._splitter.saveState())
-        super().closeEvent(event)
+        super().closeEvent(a0)
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)

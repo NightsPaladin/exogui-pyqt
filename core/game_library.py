@@ -21,6 +21,7 @@ from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import Optional
 
 # ── pre-compiled patterns (avoid per-call re-cache lookups) ──────────────────
 
@@ -55,6 +56,7 @@ _RE_INSTALL_YEAR_SCRIPT = re.compile(r"\(\d{4}\)\.(bsh|msh|command|sh)$")
 
 from core.project import ProjectConfig, EXODOS
 from core import aria_index as _aria_index
+from core.debug import dbg
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -261,16 +263,17 @@ _DETAIL_GALLERY_IMAGE_TYPES = tuple(dict.fromkeys(
 _IS_LINUX   = sys.platform.startswith("linux")
 _IS_WINDOWS = sys.platform == "win32"
 
-# ── disk cache ────────────────────────────────────────────────────────────────
-# Bump _CACHE_VERSION whenever the Game dataclass or resolution logic changes
-# in a way that makes old cache files incompatible.
-_CACHE_VERSION = 5
-_CACHE_BASE    = os.path.expanduser("~/.cache/exogui/library")
-
 # ── emulator display map ──────────────────────────────────────────────────────
 # Path to the plain-text mapping file that lives alongside this package.
 _APP_DIR             = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EMU_DISPLAY_MAP_PATH = os.path.join(_APP_DIR, "emulator_display_map.txt")
+
+# ── disk cache ────────────────────────────────────────────────────────────────
+# Bump _CACHE_VERSION whenever the Game dataclass or resolution logic changes
+# in a way that makes old cache files incompatible.
+# Cache lives inside the app directory so nothing is written to ~/.cache.
+_CACHE_VERSION = 6
+_CACHE_BASE    = os.path.join(_APP_DIR, ".cache", "library")
 
 
 @lru_cache(maxsize=1)
@@ -447,7 +450,7 @@ class GameLibrary:
     """
 
     def __init__(self, root: str, xml_mode: str = "auto",
-                 config: ProjectConfig | None = None):
+                 config: Optional[ProjectConfig] = None):
         self.root = root
         self.xml_mode = xml_mode
         self._config = config if config is not None else EXODOS
@@ -544,7 +547,7 @@ class GameLibrary:
                     modes.add(m)
         return sorted(modes)
 
-    def get_by_id(self, game_id: str) -> Game | None:
+    def get_by_id(self, game_id: str) -> Optional[Game]:
         return self._by_id.get(game_id)
 
     # ── disk cache ────────────────────────────────────────────────────────────
@@ -650,7 +653,9 @@ class GameLibrary:
         else:
             primary_file = "dosbox_macos.txt"
         path = os.path.join(self.root, "eXo", "util", primary_file)
+        dbg(f"[{self._config.id}] emulator map: looking for {primary_file} at {path}")
         if not os.path.exists(path):
+            dbg(f"[{self._config.id}] emulator map: file not found — using default emulator '{self._config.default_emulator}'")
             return
         with open(path, "r", errors="replace") as fh:
             for raw in fh:
@@ -662,6 +667,7 @@ class GameLibrary:
                 emu = emulator.strip()
                 self._emulator_map[title.lower()] = emu
                 self._emulator_map[title_with_year.strip().lower()] = emu
+        dbg(f"[{self._config.id}] emulator map: loaded {len(self._emulator_map)} entries")
 
         # Scan exception.sh/bsh files in the !dos directory for games that invoke
         # the Wine flatpak with a Windows DOSBox ECE binary.
@@ -678,7 +684,8 @@ class GameLibrary:
                 r"com\.retro_exo\.wine\b.*?emulators/dosbox/([^/\"'\s\\]+)/dosbox\.exe",
                 re.IGNORECASE,
             )
-            dos_dir = os.path.join(self.root, "eXo", self._config.id, "!dos")
+            dos_dir = self._config.abs_scripts(self.root)
+            dbg(f"[{self._config.id}] scanning for exception.sh in: {dos_dir}")
             if os.path.isdir(dos_dir):
                 for game_dir in os.listdir(dos_dir):
                     for exc_name in ("exception.sh", "exception.bsh"):
@@ -741,11 +748,46 @@ class GameLibrary:
 
     def _parse_xml(self) -> None:
         xml_path = self._config.xml_path(self.root, self.xml_mode)
-        if not os.path.exists(xml_path):
-            # Fall back to "all" if the requested variant doesn't exist
-            fallback = self._config.xml_path(self.root, "all")
-            xml_path = fallback if os.path.exists(fallback) else xml_path
+        dbg(f"[{self._config.id}] XML: configured path = {xml_path}")
 
+        if not os.path.exists(xml_path):
+            # Try all other configured XML variants
+            for variant in self._config.xml_variants.values():
+                candidate = os.path.join(self.root, *variant.replace("\\", "/").split("/"))
+                if os.path.exists(candidate):
+                    dbg(f"[{self._config.id}] XML: found via variant fallback = {candidate}")
+                    xml_path = candidate
+                    break
+
+        if not os.path.exists(xml_path):
+            # Auto-discover: search Data/Platforms/ and xml/ for any matching XML.
+            # Tries platform_tag-named file first, then any XML in those dirs.
+            tag = self._config.platform_tag
+            dbg(f"[{self._config.id}] XML: configured path missing — scanning for '{tag}.xml'")
+            for search_dir in [
+                os.path.join(self.root, "Data", "Platforms"),
+                os.path.join(self.root, "xml"),
+                os.path.join(self.root, "xml", "all"),
+            ]:
+                if not os.path.isdir(search_dir):
+                    continue
+                exact = os.path.join(search_dir, f"{tag}.xml")
+                if os.path.exists(exact):
+                    dbg(f"[{self._config.id}] XML: auto-discovered = {exact}")
+                    xml_path = exact
+                    break
+                for fname in sorted(os.listdir(search_dir)):
+                    if not fname.startswith((".", "_")) and fname.lower().endswith(".xml"):
+                        xml_path = os.path.join(search_dir, fname)
+                        dbg(f"[{self._config.id}] XML: auto-discovered (first match) = {xml_path}")
+                        break
+                if os.path.exists(xml_path):
+                    break
+
+        if not os.path.exists(xml_path):
+            dbg(f"[{self._config.id}] XML: not found anywhere — ET.parse will raise")
+
+        dbg(f"[{self._config.id}] XML: parsing {xml_path}")
         tree = ET.parse(xml_path)
         root = tree.getroot()
 
@@ -801,10 +843,12 @@ class GameLibrary:
             root_folder_unix = game.root_folder.replace("\\", "/")
             game.game_dir = root_folder_unix.split("/")[-1] if root_folder_unix else ""
 
-            # Skip utility/admin entries that point outside the project tree
-            # (e.g. the "Setup eXoDOS" shortcut entry whose RootFolder is "..").
-            # All real games have root_folder starting with "eXo/".
-            if root_folder_unix.startswith(".."):
+            # Skip utility/admin entries — collection placeholders and setup
+            # shortcuts that are not launchable games.  Two known forms:
+            #   • RootFolder starts with ".." (eXoDOS: "Setup eXoDOS" shortcut)
+            #   • ApplicationPath is empty (eXoWin3x, eXoAppleIIGS, etc.)
+            # All real games have a non-empty ApplicationPath.
+            if not game.app_path or root_folder_unix.startswith(".."):
                 continue
 
             # Emulator from map.
@@ -851,7 +895,9 @@ class GameLibrary:
     def _load_aria_index(self) -> None:
         """Load the torrent index file into a gamename → GameEntry dict."""
         index_path = self._config.aria_index_path(self.root)
+        dbg(f"[{self._config.id}] aria index: loading from {index_path}")
         self._aria = _aria_index.load_index(index_path)
+        dbg(f"[{self._config.id}] aria index: {len(self._aria)} entries")
 
     def _resolve_installation(self) -> None:
         """
@@ -870,6 +916,8 @@ class GameLibrary:
         Similarly pre-scans _dos_base to build a gamename_map.
         """
         game_data_base = self._zip_base
+        dbg(f"[{self._config.id}] resolve_installation: game_data_base = {game_data_base}")
+        dbg(f"[{self._config.id}] resolve_installation: scripts_base   = {self._dos_base}")
 
         # ── Pre-scan game_data_base once: collect installed dirs and ZIP stems ──
         installed_dirs: set[str] = set()
@@ -883,6 +931,7 @@ class GameLibrary:
                         zip_stems.add(os.path.splitext(entry.name)[0])
         except OSError:
             pass
+        dbg(f"[{self._config.id}] resolve_installation: {len(installed_dirs)} installed dirs, {len(zip_stems)} ZIPs")
 
         # ── Pre-scan _dos_base once: build gamedir → gamename map ─────────────
         gamename_map: dict[str, str] = {}

@@ -28,6 +28,3 @@ env/
 
 # eXoGUI runtime — never commit these
 *.log
-
-# Local sync helper (path-specific to the source install)
-sync-from-source.sh

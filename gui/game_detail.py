@@ -8,13 +8,13 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+from typing import Optional
 
-from PyQt6.QtCore import Qt, QSize, QTimer, QUrl, pyqtSignal
-from PyQt6.QtGui import QPixmap, QPainter, QColor, QFont, QLinearGradient
+from PyQt6.QtCore import Qt, QUrl, pyqtSignal
+from PyQt6.QtGui import QPixmap
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
-    QScrollArea, QFrame, QSizePolicy, QGridLayout, QStackedWidget,
-    QSplitter, QTextEdit,
+    QScrollArea, QFrame, QSizePolicy, QTextEdit,
 )
 
 try:
@@ -23,9 +23,9 @@ try:
 except ImportError:
     _HAS_MULTIMEDIA = False
 
-from core import debug
 from core.game_library import Game, Extra
 from core.image_cache import ImageCache
+from core.debug import dbg
 from gui.flow_layout import FlowLayout
 from gui import themes
 
@@ -123,7 +123,7 @@ class VideoCard(QWidget):
         # Request thumbnail asynchronously
         cache.get_video_thumb(
             extra.path,
-            callback=lambda _k, pm: self._set_thumb(pm),
+            callback=lambda _, pm: self._set_thumb(pm),
             scaled_to=(_VT_W, _VT_H),
         )
 
@@ -132,9 +132,9 @@ class VideoCard(QWidget):
             self._thumb_lbl.setText("")
             self._thumb_lbl.setPixmap(pm)
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, a0) -> None:
         _open_path(self._extra.path)
-        super().mousePressEvent(event)
+        super().mousePressEvent(a0)
 
 
 # ── screenshot carousel ───────────────────────────────────────────────────────
@@ -144,28 +144,22 @@ class ScreenshotCarousel(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self._current_pm: QPixmap | None = None
-
         self._main_label = QLabel()
         self._main_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._main_label.setFixedHeight(200)   # updated dynamically when image loads
+        self._main_label.setMinimumHeight(200)
         t = themes.current()
         self._main_label.setStyleSheet(f"background:{t.bg_window}; border-radius:6px;")
         self._main_label.setSizePolicy(
-            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed
+            QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
 
         self._thumb_scroll = QScrollArea()
-        # 80px thumbnail + 4px top margin + 4px bottom margin + 6px scrollbar
-        self._thumb_scroll.setFixedHeight(94)
+        self._thumb_scroll.setFixedHeight(68)
         self._thumb_scroll.setWidgetResizable(True)
         self._thumb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
         self._thumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         self._thumb_scroll.setStyleSheet(
             f"QScrollArea {{ background:{t.bg_window}; border:none; }}"
-            f"QScrollBar:horizontal {{ background:transparent; height:6px; border:none; margin:0; }}"
-            f"QScrollBar::handle:horizontal {{ background:{t.handle}; border-radius:3px; min-width:20px; }}"
-            "QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width:0; }"
         )
 
         self._thumb_container = QWidget()
@@ -178,7 +172,7 @@ class ScreenshotCarousel(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
-        layout.addWidget(self._main_label)
+        layout.addWidget(self._main_label, 1)
         layout.addWidget(self._thumb_scroll)
 
         self._paths: list[str] = []
@@ -192,12 +186,13 @@ class ScreenshotCarousel(QWidget):
         # Clear thumbs
         for i in reversed(range(self._thumb_layout.count())):
             item = self._thumb_layout.itemAt(i)
-            if item and item.widget():
-                item.widget().deleteLater()
-                self._thumb_layout.removeItem(item)
+            if item:
+                w = item.widget()
+                if w:
+                    w.deleteLater()
+                    self._thumb_layout.removeItem(item)
 
         if not paths:
-            self._current_pm = None
             self._main_label.setText("No images available")
             t = themes.current()
             self._main_label.setStyleSheet(
@@ -210,7 +205,7 @@ class ScreenshotCarousel(QWidget):
 
         for i, path in enumerate(paths):
             thumb = QLabel()
-            thumb.setFixedSize(120, 80)
+            thumb.setFixedSize(88, 60)
             thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
             thumb.setStyleSheet(
                 f"background:{t.bg_card}; border:2px solid {t.accent if i == 0 else t.border};"
@@ -218,10 +213,10 @@ class ScreenshotCarousel(QWidget):
             )
             thumb.setCursor(Qt.CursorShape.PointingHandCursor)
             idx = i  # capture for lambda
-            thumb.mousePressEvent = lambda _e, n=idx: self._show(n)
+            thumb.mousePressEvent = lambda ev, n=idx: self._show(n)
             self._thumb_layout.insertWidget(i, thumb)
-            cache.get(path, callback=lambda p, pm, lbl=thumb: self._set_thumb(lbl, pm),
-                      scaled_to=(120, 80))
+            cache.get(path, callback=lambda _, pm, lbl=thumb: self._set_thumb(lbl, pm),
+                      scaled_to=(88, 60))
 
         self._show(0)
 
@@ -235,12 +230,15 @@ class ScreenshotCarousel(QWidget):
         self._current = idx
         self._cache.get(
             self._paths[idx],
-            callback=lambda p, pm: self._set_main(pm),
-            scaled_to=(1280, 800),
+            callback=lambda _, pm: self._set_main(pm),
+            scaled_to=(640, 400),
         )
         # Update thumbnail borders
         for i in range(self._thumb_layout.count() - 1):
-            w = self._thumb_layout.itemAt(i).widget()
+            item = self._thumb_layout.itemAt(i)
+            if not item:
+                continue
+            w = item.widget()
             if w:
                 border = "#4a90d9" if i == idx else "#333"
                 current_style = w.styleSheet()
@@ -249,32 +247,13 @@ class ScreenshotCarousel(QWidget):
                                  .replace("border:2px solid #333", f"border:2px solid {border}")
                 )
 
-    def resizeEvent(self, event) -> None:
-        super().resizeEvent(event)
-        self._rescale_main()
-
     def _set_main(self, pm: QPixmap) -> None:
         if not pm.isNull():
-            self._current_pm = pm
-            self._rescale_main()
-
-    def _rescale_main(self) -> None:
-        """Keep the display area at 4:3 relative to the label width, then fit the image within it."""
-        w = self._main_label.width()
-        if w <= 0:
-            return
-        # Fixed 4:3 display area — typical DOS screenshots fill it perfectly;
-        # wider images get small top/bottom gaps; square images get small side gaps.
-        h = max(200, w * 3 // 4)
-        self._main_label.setFixedHeight(h)
-        pm = self._current_pm
-        if pm is None or pm.isNull():
-            return
-        self._main_label.setPixmap(
-            pm.scaled(QSize(w, h),
-                      Qt.AspectRatioMode.KeepAspectRatio,
-                      Qt.TransformationMode.SmoothTransformation)
-        )
+            self._main_label.setPixmap(
+                pm.scaled(self._main_label.size(),
+                          Qt.AspectRatioMode.KeepAspectRatio,
+                          Qt.TransformationMode.SmoothTransformation)
+            )
 
 
 # ── detail panel ─────────────────────────────────────────────────────────────
@@ -293,32 +272,30 @@ class GameDetailPanel(QWidget):
     install_requested   = pyqtSignal(object)    # Game
     uninstall_requested = pyqtSignal(object)    # Game
     cancel_requested    = pyqtSignal()
+    favorite_toggled    = pyqtSignal(str)       # game_id
 
     def __init__(self, image_cache: ImageCache, exodos_root: str, parent=None):
         super().__init__(parent)
         self._cache   = image_cache
         self._fallback = os.path.join(exodos_root, "eXo", "util", "exodos.png")
-        self._game: Game | None = None
+        self._game: Optional[Game] = None
         self._autoplay: bool = False
         self._playing_path: str = ""
         self._audio_rows: list[tuple[str, QPushButton]] = []
+        self._is_favorite: bool = False
+        self._current_game_id: str = ""
 
         if _HAS_MULTIMEDIA:
-            default_dev = QMediaDevices.defaultAudioOutput()
+            default_dev = QMediaDevices.defaultAudioOutput()  # type: ignore[union-attr]
             if default_dev.isNull():
-                # No specific device found; let Qt choose (may use a system default)
-                if debug.enabled:
-                    print("[audio] defaultAudioOutput() is null — using Qt default device",
-                          file=sys.stderr)
-                self._audio_output = QAudioOutput(self)
+                dbg("[audio] defaultAudioOutput() is null — using Qt default device")
+                self._audio_output = QAudioOutput(self)  # type: ignore[operator]
             else:
-                if debug.enabled:
-                    print(f"[audio] device: {default_dev.description()!r} "
-                          f"({default_dev.id().data().decode(errors='replace')!r})",
-                          file=sys.stderr)
-                self._audio_output = QAudioOutput(default_dev, self)
+                dbg(f"[audio] device: {default_dev.description()!r} "
+                    f"({default_dev.id().data().decode(errors='replace')!r})")
+                self._audio_output = QAudioOutput(default_dev, self)  # type: ignore[operator]
             self._audio_output.setVolume(0.7)
-            self._player: QMediaPlayer | None = QMediaPlayer(self)
+            self._player: Optional[QMediaPlayer] = QMediaPlayer(self)  # type: ignore[operator]
             self._player.setAudioOutput(self._audio_output)
             self._player.playbackStateChanged.connect(self._on_playback_state_changed)
             self._player.errorOccurred.connect(self._on_player_error)
@@ -344,8 +321,10 @@ class GameDetailPanel(QWidget):
             # Clear existing content (scroll area) for a theme rebuild
             while outer.count():
                 item = outer.takeAt(0)
-                if item and item.widget():
-                    item.widget().deleteLater()
+                if item:
+                    w = item.widget()
+                    if w:
+                        w.deleteLater()
 
         self._scroll = QScrollArea()
         self._scroll.setWidgetResizable(True)
@@ -431,9 +410,24 @@ class GameDetailPanel(QWidget):
         self._cancel_btn = _button("✕  Cancel", "#c62828")
         self._cancel_btn.clicked.connect(self._on_cancel)
         self._cancel_btn.hide()
+        self._fav_btn = QPushButton("☆")
+        self._fav_btn.setFixedSize(36, 36)
+        self._fav_btn.setCheckable(True)
+        self._fav_btn.setEnabled(False)
+        self._fav_btn.setToolTip("Favorite")
+        self._fav_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self._fav_btn.setStyleSheet(
+            "QPushButton { background:transparent; color:#666; border:1px solid #555;"
+            " border-radius:6px; font-size:18px; }"
+            "QPushButton:checked { color:#ffd700; border-color:#ffd700; }"
+            "QPushButton:hover:!disabled { border-color:#ffd700; color:#ffd700; }"
+            "QPushButton:disabled { color:#333; border-color:#333; }"
+        )
+        self._fav_btn.clicked.connect(self._on_fav_clicked)
         btn_row.addWidget(self._play_btn)
         btn_row.addWidget(self._install_btn)
         btn_row.addWidget(self._cancel_btn)
+        btn_row.addWidget(self._fav_btn)
         btn_row.addStretch()
         meta_col.addLayout(btn_row)
 
@@ -560,11 +554,13 @@ class GameDetailPanel(QWidget):
     def rebuild_ui(self) -> None:
         """Rebuild the entire detail panel with the current theme (call after theme change)."""
         saved_game = self._game
+        saved_is_fav = self._is_favorite
         self._game = None
         self._build_ui()
         self._show_placeholder()
         if saved_game is not None:
             self.show_game(saved_game)
+            self.set_favorite(saved_is_fav)
 
     # ── audio playback ────────────────────────────────────────────────────────
 
@@ -581,10 +577,9 @@ class GameDetailPanel(QWidget):
         self._playing_path = ""
         self._refresh_play_buttons()
 
-    def _on_player_error(self, error, error_string: str) -> None:
-        """Log audio playback errors to stderr (helps diagnose missing backends)."""
-        if error_string and debug.enabled:
-            print(f"[audio] {error_string}", file=sys.stderr)
+    def _on_player_error(self, _error, error_string: str) -> None:
+        if error_string:
+            dbg(f"[audio] {error_string}")
 
     def _play_audio(self, path: str) -> None:
         """Toggle playback for *path*; stops current track if a different one is chosen."""
@@ -592,7 +587,7 @@ class GameDetailPanel(QWidget):
             return
         if self._playing_path == path:
             state = self._player.playbackState()
-            if _HAS_MULTIMEDIA and state == QMediaPlayer.PlaybackState.PlayingState:
+            if state == self._player.PlaybackState.PlayingState:
                 self._player.pause()
             else:
                 self._player.play()
@@ -606,8 +601,8 @@ class GameDetailPanel(QWidget):
 
     def _refresh_play_buttons(self) -> None:
         is_playing = (
-            _HAS_MULTIMEDIA and self._player is not None
-            and self._player.playbackState() == QMediaPlayer.PlaybackState.PlayingState
+            self._player is not None
+            and self._player.playbackState() == self._player.PlaybackState.PlayingState
         )
         for path, btn in self._audio_rows:
             if not btn:
@@ -623,6 +618,8 @@ class GameDetailPanel(QWidget):
         self.stop_audio()
 
         self._game = game
+        self._current_game_id = game.id or ""
+        self._fav_btn.setEnabled(bool(self._current_game_id))
 
         self._title_label.setText(game.title)
 
@@ -673,8 +670,8 @@ class GameDetailPanel(QWidget):
         self._play_btn.setEnabled(game.installed)
 
         if game.installed:
-            self._install_btn.setText("✖  Uninstall")
-            _restyle_button(self._install_btn, "#8b2222")
+            self._install_btn.setText("🗑  Uninstall")
+            _restyle_button(self._install_btn, "#b71c1c")
             self._install_btn.setEnabled(True)
             self._download_size_label.hide()
         else:
@@ -683,7 +680,7 @@ class GameDetailPanel(QWidget):
             # Lite mode: ZIP not yet acquired
             zip_present = getattr(game, "zip_present", True)
             if not zip_present:
-                self._install_btn.setText("⬇  Download & Install")
+                self._install_btn.setText("⬇  Download")
                 dl_size = getattr(game, "download_size_str", "")
                 if dl_size:
                     self._download_size_label.setText(f"Download: ~{dl_size}")
@@ -711,7 +708,7 @@ class GameDetailPanel(QWidget):
         if cover_path:
             self._set_box_art_fallback()  # show icon immediately; replaced on load
             self._cache.get(cover_path,
-                            callback=lambda p, pm: self._set_box_art(pm),
+                            callback=lambda _, pm: self._set_box_art(pm),
                             scaled_to=(160, 210))
         else:
             self._set_box_art_fallback()
@@ -736,19 +733,25 @@ class GameDetailPanel(QWidget):
         # Clear video flow
         while self._videos_flow.count():
             item = self._videos_flow.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
+            if item:
+                w = item.widget()
+                if w:
+                    w.deleteLater()
 
         while self._music_list.count() > 1:
             item = self._music_list.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
+            if item:
+                w = item.widget()
+                if w:
+                    w.deleteLater()
 
         # Clear docs list (keep trailing stretch)
         while self._docs_list.count() > 1:
             item = self._docs_list.takeAt(0)
-            if item and item.widget():
-                item.widget().deleteLater()
+            if item:
+                w = item.widget()
+                if w:
+                    w.deleteLater()
 
         # Reset audio-row tracking (widgets above were just deleted).
         self._audio_rows = []
@@ -859,6 +862,17 @@ class GameDetailPanel(QWidget):
 
         return row
 
+    def _on_fav_clicked(self) -> None:
+        if self._current_game_id:
+            self.favorite_toggled.emit(self._current_game_id)
+
+    def set_favorite(self, is_fav: bool) -> None:
+        """Update the favorite button to reflect the current game's favorite state."""
+        self._is_favorite = is_fav
+        self._fav_btn.setChecked(is_fav)
+        self._fav_btn.setText("★" if is_fav else "☆")
+        self._fav_btn.setEnabled(bool(self._current_game_id))
+
     def _show_placeholder(self) -> None:
         self._title_label.setText("Select a game")
         self._year_genre_label.setText("")
@@ -870,6 +884,9 @@ class GameDetailPanel(QWidget):
         self._install_btn.setEnabled(False)
         self._install_btn.setText("⬇  Install")
         self._cancel_btn.hide()
+        self._fav_btn.setEnabled(False)
+        self._fav_btn.setChecked(False)
+        self._fav_btn.setText("☆")
         self._fetch_phase_label.hide()
         self._fetch_phase_label.setText("")
         self._download_size_label.hide()
@@ -943,7 +960,7 @@ class GameDetailPanel(QWidget):
                 self._install_btn.setText(f"Extracting… {pct}%")
         self._install_btn.setEnabled(False)
 
-    def set_install_done(self, success: bool, message: str = "") -> None:
+    def set_install_done(self, success: bool, _message: str = "") -> None:
         self._fetch_phase_label.hide()
         self._fetch_phase_label.setText("")
         self._cancel_btn.hide()
@@ -952,15 +969,15 @@ class GameDetailPanel(QWidget):
             self._installed_label.setStyleSheet(
                 f"color:{themes.current().green}; font-size:11px;")
             self._play_btn.setEnabled(True)
-            self._install_btn.setText("✖  Uninstall")
-            _restyle_button(self._install_btn, "#8b2222")
+            self._install_btn.setText("🗑  Uninstall")
+            _restyle_button(self._install_btn, "#b71c1c")
             self._install_btn.setEnabled(True)
             self._download_size_label.hide()
         else:
             self._install_btn.setText("⬇  Retry")
             self._install_btn.setEnabled(True)
 
-    def set_uninstall_done(self, success: bool, message: str = "") -> None:
+    def set_uninstall_done(self, success: bool, _message: str = "") -> None:
         if success:
             self._installed_label.setText("○ Not installed")
             self._installed_label.setStyleSheet(
@@ -981,7 +998,7 @@ class GameDetailPanel(QWidget):
         if self._game:
             zip_present = getattr(self._game, "zip_present", True)
             if not zip_present and not self._game.installed:
-                self._install_btn.setText("⬇  Download & Install")
+                self._install_btn.setText("⬇  Download")
                 dl_size = getattr(self._game, "download_size_str", "")
                 if dl_size:
                     self._download_size_label.setText(f"Download: ~{dl_size}")

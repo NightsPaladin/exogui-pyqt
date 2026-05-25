@@ -4,7 +4,7 @@
 > or supported by the eXoDOS project or the retro-exo.com team.
 
 A Python/PyQt6 GUI launcher for the [eXoDOS](https://www.retro-exo.com/) MS-DOS game collection and the eXoWin3x Windows 3.x collection.  
-Works on **macOS** and **Linux**.
+Primarily developed and tested on **macOS**. Linux is supported but has received only minimal testing — bug reports welcome.
 
 ---
 
@@ -83,20 +83,24 @@ Open **File → Settings** and configure each collection:
 
 You can add multiple projects (eXoDOS + eXoWin3x simultaneously) using the **+ Add** button.
 
-![Settings](exogui-settings.png)
+| macOS | Linux |
+|-------|-------|
+| ![Main window — macOS](screenshots/exogui-mac-main.png) | ![Main window — Linux](screenshots/exogui-linux-main.png) |
+| ![Settings — macOS](screenshots/exogui-mac-settings.png) | ![Settings — Linux](screenshots/exogui-linux-settings.png) |
 
-### Views
+### Parental Controls
 
-Click the **≡ / ⊞ / ☰** buttons at the top of the game list to switch between:
-- **≡ List** — compact rows with box art thumbnail, title, year, and genre
-- **⊞ Grid** — box-art cover grid
-- **☰ Table** — sortable columns (Title, Year, Developer, Publisher, Genre)
+eXoGUI defaults to **family-friendly titles only**. On first launch you are prompted to set a 4-digit PIN that protects the adult-content setting — children cannot enable it without the PIN.
 
-![List view](exogui-list.png)
+| First-launch setup | PIN entry |
+|--------------------|-----------|
+| ![First-launch PIN setup — macOS](screenshots/exogui-mac-first-launch.png) | ![PIN entry — macOS](screenshots/exogui-mac-pin-entry.png) |
 
-![Grid view](exogui-grid.png)
+The PIN can be changed or removed at any time via **Settings → Parental Controls**. If the PIN is forgotten, reset it with:
 
-![Table view](exogui-table.png)
+```bash
+python3 main.py --reset-pin
+```
 
 ### Lite Mode (download on demand)
 

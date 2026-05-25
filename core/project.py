@@ -2,18 +2,30 @@
 project.py — ProjectConfig dataclass describing an eXo collection's path
 conventions, XML structure, and emulator defaults.
 
-Two built-in configs are provided:
-  EXODOS   — the classic eXoDOS DOS-game collection
-  EXOWIN3X — the eXoWin3x Windows 3.x game collection
+Eight built-in configs are provided, one per eXo project:
+  EXODOS       — eXoDOS        (MS-DOS)
+  EXOWIN3X     — eXoWin3x      (Windows 3.x)
+  EXOSCUMMVM   — eXoScummVM    (ScummVM adventure games)
+  EXOWIN9X     — eXoWin9x      (Windows 9x)
+  EXOAPPLEIIGS — eXoAppleIIGS  (Apple IIgs)
+  EXODREAMM    — eXoDREAMM     (LucasArts via DREAMM emulator)
+  EXODEMOSCENE — eXoDemoScene  (Demo scene productions)
+  EXOIF        — eXoIF         (Interactive Fiction)
 
 A third-party or future collection can define its own ProjectConfig and pass
 it to GameLibrary / Launcher at construction time.
+
+Note: All values have been verified against torrent metadata downloads.
+eXoWin9x music_subdir, video_subdir, and xml path are strongly inferred
+from image subdir naming (Images/Windows 9x confirmed); ScummVM platform
+tag inferred from confirmed image/music/xml dir names.
 """
 
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+from typing import Optional
 
 
 @dataclass(frozen=True)
@@ -67,7 +79,6 @@ class ProjectConfig:
     default_emulator: str       # fallback when emulator map has no entry
     detect_marker: str          # relative path to test for auto-detection
     torrent_name: str = ""      # torrent filename in eXo/util/aria/, e.g. "eXoDOS.torrent"
-    gamedata_zip_subdir: str = ""  # directory holding per-game extras ZIPs, e.g. "Content/GameData/eXoDOS"
 
     def xml_path(self, root: str, xml_mode: str = "auto") -> str:
         """Return the absolute path to the XML file for the given mode."""
@@ -92,12 +103,6 @@ class ProjectConfig:
 
     def abs_scripts(self, root: str) -> str:
         return os.path.join(root, *self.scripts_subdir.split("/"))
-
-    def abs_gamedata_zip_base(self, root: str) -> str:
-        """Absolute path to the per-game extras ZIP directory, or '' if not configured."""
-        if not self.gamedata_zip_subdir:
-            return ""
-        return os.path.join(root, *self.gamedata_zip_subdir.split("/"))
 
     def aria_index_path(self, root: str) -> str:
         """Absolute path to the aria2c index file."""
@@ -132,9 +137,6 @@ EXODOS = ProjectConfig(
     default_emulator="dosbox-staging",
     detect_marker="eXo/eXoDOS",
     torrent_name="eXoDOS.torrent",
-    # GameData ZIPs contain per-game videos, music, manuals, and in-game extras.
-    # They live in Content/GameData/eXoDOS/ and extract to the collection root.
-    gamedata_zip_subdir="Content/GameData/eXoDOS",
 )
 
 EXOWIN3X = ProjectConfig(
@@ -156,17 +158,134 @@ EXOWIN3X = ProjectConfig(
     torrent_name="eXoWin3x.torrent",
 )
 
-ALL_PROJECTS: list[ProjectConfig] = [EXODOS, EXOWIN3X]
+EXOSCUMMVM = ProjectConfig(
+    id="exoscummvm",
+    display_name="eXoScummVM",
+    platform_tag="ScummVM",
+    xml_variants={
+        "auto":   "xml/all/ScummVM.xml",
+        "all":    "xml/all/ScummVM.xml",
+        "family": "xml/family/ScummVM.xml",
+    },
+    image_subdir="Images/ScummVM",
+    music_subdir="Music/ScummVM",
+    video_subdir="",
+    game_data_subdir="eXo/eXoScummVM",
+    scripts_subdir="eXo/eXoScummVM/!ScummVM",
+    default_emulator="scummvm",
+    detect_marker="eXo/eXoScummVM",
+    torrent_name="eXoScummVM.torrent",
+)
+
+EXOWIN9X = ProjectConfig(
+    id="exowin9x",
+    display_name="eXoWin9x",
+    platform_tag="Windows 9x",
+    xml_variants={
+        "auto":   "xml/all/Windows 9x.xml",
+        "all":    "xml/all/Windows 9x.xml",
+        "family": "xml/family/Windows 9x.xml",
+    },
+    image_subdir="Images/Windows 9x",
+    music_subdir="Music/Windows 9x",
+    video_subdir="Videos/Windows 9x",
+    game_data_subdir="eXo/eXoWin9x",
+    scripts_subdir="eXo/eXoWin9x/!win9x",
+    default_emulator="wine",
+    detect_marker="eXo/eXoWin9x",
+    torrent_name="eXoWin9x.torrent",
+)
+
+EXOAPPLEIIGS = ProjectConfig(
+    id="exoappleiigs",
+    display_name="eXoAppleIIGS",
+    platform_tag="Apple IIGS",
+    xml_variants={
+        "auto":   "xml/all/Apple IIGS.xml",
+        "all":    "xml/all/Apple IIGS.xml",
+        "family": "xml/family/Apple IIGS.xml",
+    },
+    image_subdir="Images/Apple IIGS",
+    music_subdir="Music/Apple IIGS",
+    video_subdir="",
+    game_data_subdir="eXo/eXoAppleIIGS",
+    scripts_subdir="eXo/eXoAppleIIGS/!appleiigs",
+    default_emulator="gsplus",
+    detect_marker="eXo/eXoAppleIIGS",
+    torrent_name="eXoAppleIIGS.torrent",
+)
+
+EXODREAMM = ProjectConfig(
+    id="exodreamm",
+    display_name="eXoDREAMM",
+    platform_tag="DREAMM",
+    xml_variants={
+        "auto":   "xml/all/DREAMM.xml",
+        "all":    "xml/all/DREAMM.xml",
+        "family": "xml/family/DREAMM.xml",
+    },
+    image_subdir="Images/DREAMM",
+    music_subdir="Music/DREAMM",
+    video_subdir="Videos/DREAMM",
+    game_data_subdir="eXo/eXoDREAMM",
+    scripts_subdir="eXo/eXoDREAMM/!DREAMM",
+    default_emulator="dreamm",
+    detect_marker="eXo/eXoDREAMM",
+    torrent_name="eXoDREAMM.torrent",
+)
+
+EXODEMOSCENE = ProjectConfig(
+    id="exodemoscene",
+    display_name="eXoDemoScene",
+    platform_tag="eXoDemoScene",
+    xml_variants={
+        "auto":   "xml/all/eXoDemoScene.xml",
+        "all":    "xml/all/eXoDemoScene.xml",
+        "family": "xml/family/eXoDemoScene.xml",
+    },
+    image_subdir="Images/eXoDemoScene",
+    music_subdir="Music/eXoDemoScene",
+    video_subdir="",
+    game_data_subdir="eXo/eXoDemoScn",
+    scripts_subdir="eXo/eXoDemoScn/!demoscn",
+    default_emulator="dosbox-staging",
+    detect_marker="eXo/eXoDemoScn",
+    torrent_name="eXoDemoScene.torrent",
+)
+
+EXOIF = ProjectConfig(
+    id="exoif",
+    display_name="eXoIF",
+    platform_tag="Interactive Fiction",
+    xml_variants={
+        "auto":   "xml/all/Interactive Fiction.xml",
+        "all":    "xml/all/Interactive Fiction.xml",
+        "family": "xml/family/Interactive Fiction.xml",
+    },
+    image_subdir="Images/Interactive Fiction",
+    music_subdir="Music/Interactive Fiction",
+    video_subdir="",
+    game_data_subdir="eXo/eXoIF",
+    scripts_subdir="eXo/eXoIF/!IF",
+    default_emulator="frotz",
+    detect_marker="eXo/eXoIF",
+    torrent_name="eXoIF.torrent",
+)
+
+ALL_PROJECTS: list[ProjectConfig] = [
+    EXODOS, EXOWIN3X, EXOSCUMMVM, EXOWIN9X,
+    EXOAPPLEIIGS, EXODREAMM, EXODEMOSCENE, EXOIF,
+]
 
 _BY_ID: dict[str, ProjectConfig] = {p.id: p for p in ALL_PROJECTS}
 
 
-def get_project(project_id: str) -> ProjectConfig | None:
+def get_project(project_id: str) -> Optional[ProjectConfig]:
     """Return the ProjectConfig for *project_id*, or None if unknown."""
     return _BY_ID.get(project_id)
 
 
-def detect_project(root: str) -> ProjectConfig | None:
+def detect_project(root: str) -> Optional[ProjectConfig]:
     """
     Auto-detect which project type lives at *root* by checking for known
     marker paths.  Returns the first match or None.
