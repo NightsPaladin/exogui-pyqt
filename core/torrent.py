@@ -2,19 +2,23 @@
 torrent.py — Minimal .torrent parser for Lite-mode selective download.
 
 Returns file entries with 1-based indices suitable for aria2c's
---select-file flag so that only the metadata subset (images, XML, launch
-scripts) is fetched rather than the full game-ZIP library.
+--select-file flag so that only the non-game-data subset is fetched.
 
-Lite set definition
--------------------
-Content/XO*Metadata.zip   — images + LaunchBox XML database
-Content/!*metadata.zip    — per-game launch scripts and DOSBox configs
+Lite set definition (everything EXCEPT game data and Windows-only files)
+------------------------------------------------------------------------
+Content/*.zip             — all content ZIPs (metadata, images, books,
+                            magazines, soundtracks, videos, …)
+                            EXCEPT LaunchBox.zip (Windows frontend)
+                            EXCEPT Content/GameData/ (per-game data ZIPs,
+                              fetched on demand via install)
+                            EXCEPT Content/Dependencies/ (Windows runtimes)
+                            EXCEPT zero-byte placeholder entries (no ".")
 eXo/util/*                — unzip.exe and per-project util*.zip
+<root>/*.pdf, *.txt, …    — project manuals, readmes, catalogues
+                            (excludes *.bat and *.exe — Windows-only)
 
-Everything else is excluded from the Lite set:
-  Content/LaunchBox.zip   — Windows-only frontend application
-  Content/*.zip (other)   — optional media packs (videos, magazines, books)
-  eXo/<ProjectDir>/*.zip  — individual game ZIPs (fetched on demand)
+Individual game ZIPs are never Lite:
+  eXo/<ProjectDir>/*.zip  — fetched on demand via Download & Install
 """
 
 from __future__ import annotations
@@ -58,25 +62,59 @@ class TorrentInfo:
 
 # ── Lite selection logic ──────────────────────────────────────────────────────
 
+# Top-level Content/ entries that are Windows-only and never downloaded.
+_CONTENT_WINDOWS_ONLY = frozenset({"LaunchBox.zip"})
+
+# Content/ subdirectories whose contents are never part of the Lite set.
+# GameData/ = per-game data ZIPs (fetched on demand via install).
+# Dependencies/ = Windows runtime installers.
+_CONTENT_EXCLUDED_DIRS = frozenset({"GameData", "Dependencies"})
+
+
 def _is_lite(parts: list[str]) -> bool:
-    """Return True if this path belongs to the Lite download subset."""
+    """Return True if this torrent entry belongs to the Lite download subset.
+
+    Only evaluates torrent-level paths (e.g. ``Content/IFBooks.zip``).
+    Has no visibility into the contents of ZIP files.
+    """
     if not parts:
         return False
-    top = parts[0]
 
+    top  = parts[0]
+    name = parts[-1]
+
+    # Windows-only executables and batch scripts are never wanted on any
+    # platform, regardless of where they appear in the torrent.
+    if name.lower().endswith((".bat", ".exe")):
+        return False
+
+    # eXo/util/* — unzip helper and per-project util ZIPs.
     if top == "eXo":
         return len(parts) >= 2 and parts[1] == "util"
 
     if top == "Content":
         if len(parts) < 2:
-            return True   # zero-byte placeholder / marker file
-        name = parts[1]
-        if name.startswith("XO") and "Metadata" in name and name.endswith(".zip"):
-            return True
-        if name.startswith("!") and "metadata" in name.lower() and name.endswith(".zip"):
-            return True
-        return False
+            return False  # bare "Content" placeholder
+        second = parts[1]
+        # Subdirectories with per-game or Windows-only content.
+        if second in _CONTENT_EXCLUDED_DIRS:
+            return False
+        # Windows-only top-level Content entries.
+        if second in _CONTENT_WINDOWS_ONLY:
+            return False
+        # Zero-byte placeholder files have no file extension.
+        if "." not in second:
+            return False
+        # Everything else in Content/ is Lite (metadata, books, magazines,
+        # soundtracks, videos, catalogues, …).
+        return True
 
+    # Root-level files: manuals, readmes, catalogues, version markers.
+    # .bat/.exe already excluded above.
+    if len(parts) == 1:
+        return "." in name  # skip extensionless placeholders
+
+    # eXo/<ProjectDir>/*.zip and anything else — not Lite.
     return False
 
 

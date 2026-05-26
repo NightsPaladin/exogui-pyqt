@@ -176,13 +176,45 @@ def find_aria2c() -> Optional[str]:
     return None
 
 
+# ── index builder ────────────────────────────────────────────────────────────
+
+def _format_size(n: int) -> str:
+    """Human-readable size with a space between number and unit, matching _SIZE_RE."""
+    if n >= 1_073_741_824:
+        return f"{n / 1_073_741_824:.1f} GiB"
+    if n >= 1_048_576:
+        return f"{n / 1_048_576:.0f} MiB"
+    if n >= 1_024:
+        return f"{n // 1_024} KiB"
+    return f"{n} B"
+
+
+def build_index(torrent_path: str, output_path: str) -> int:
+    """Parse *torrent_path* and write an index.txt to *output_path*.
+
+    Each line has the format::
+
+        <index>:<torrent-relative-path>:<human-size> (<bytes>)
+
+    Returns the number of entries written.
+    """
+    from core.torrent import parse  # local import avoids circular dependency
+    info = parse(torrent_path)
+    lines: list[str] = []
+    for f in info.files:
+        lines.append(f"{f.index}:{f.path}:{_format_size(f.size)} ({f.size:,})")
+    os.makedirs(os.path.dirname(output_path), exist_ok=True)
+    with open(output_path, "w", encoding="utf-8") as fh:
+        fh.write("\n".join(lines) + "\n")
+    return len(lines)
+
+
 # ── command builder ───────────────────────────────────────────────────────────
 
 def build_aria2c_command(
     aria2c_cmd: str,
     torrent_path: str,
-    file_index: int,
-    out_filename: str,
+    files: list[tuple[int, str]],
 ) -> list[str]:
     """
     Build the argv list for a selective aria2c torrent download.
@@ -193,10 +225,10 @@ def build_aria2c_command(
         The aria2c executable / flatpak invocation string.
     torrent_path : str
         Absolute path to the ``.torrent`` file.
-    file_index : int
-        1-based file number within the torrent (from index.txt).
-    out_filename : str
-        Desired output filename, e.g. ``"Dune 2 - … (1992).zip"``.
+    files : list of (index, out_filename)
+        One entry per file to download: the 1-based torrent file number and
+        the desired output filename, e.g.
+        ``[(42, "Dune 2 - … (1992).zip"), (8, "!Bingo Granny! (2002).zip")]``.
 
     Returns
     -------
@@ -204,9 +236,10 @@ def build_aria2c_command(
         Ready to pass to ``subprocess.Popen``.
     """
     argv = aria2c_cmd.split()
+    argv.append(f"--select-file={','.join(str(i) for i, _ in files)}")
+    for idx, fname in files:
+        argv.append(f"--index-out={idx}={fname}")
     argv += [
-        f"--select-file={file_index}",
-        f"--index-out={file_index}={out_filename}",
         "--file-allocation=none",
         "--allow-overwrite=true",
         "--seed-time=0",

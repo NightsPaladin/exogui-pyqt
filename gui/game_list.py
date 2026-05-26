@@ -232,7 +232,11 @@ class GameItemDelegate(QStyledItemDelegate):
         text_top = rect.top() + pad
 
         fg_primary   = pal.color(G.Active, R.HighlightedText) if is_sel else pal.color(G.Normal, R.Text)
-        fg_secondary = pal.color(G.Normal, R.PlaceholderText)
+        if is_sel:
+            fg_secondary = QColor(pal.color(G.Active, R.HighlightedText))
+            fg_secondary.setAlphaF(0.65)
+        else:
+            fg_secondary = pal.color(G.Normal, R.PlaceholderText)
 
         painter.setFont(self._title_font)
         painter.setPen(fg_primary)
@@ -558,8 +562,8 @@ class GameListPanel(QWidget):
 
     def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(3)
+        layout.setContentsMargins(4, 4, 4, 0)
+        layout.setSpacing(4)
 
         # Debounce timer: apply search filter 150 ms after the user stops typing
         self._search_timer = QTimer(self)
@@ -917,6 +921,10 @@ class GameListPanel(QWidget):
 
     # ── public ────────────────────────────────────────────────────────────────
 
+    def reset_filters(self) -> None:
+        """Reset all filter controls to their defaults and clear the search box."""
+        self.restore_state({})
+
     def select_first(self) -> None:
         if self._proxy_model.rowCount() > 0:
             idx = self._proxy_model.index(0, 0)
@@ -934,6 +942,124 @@ class GameListPanel(QWidget):
         self._source_model.set_favorites(favorites)
         self._proxy_model.set_favorites(favorites)
 
+    def get_state(self) -> dict:
+        """Return a snapshot of current filter settings and selected game ID."""
+        state: dict = {
+            "view_mode": self._view_stack.currentIndex(),
+            "preset":    self._preset_combo.currentText(),
+            "genre":     self._genre_combo.currentText(),
+            "year":      self._year_combo.currentText(),
+            "rating":    self._rating_combo.currentText(),
+            "play_mode": self._play_mode_combo.currentText(),
+            "show_mode": self._installed_combo.currentIndex(),
+            # "search": self._search.text(),  # uncomment to persist search text
+        }
+        cur = self._shared_selection.currentIndex()
+        if cur.isValid():
+            src_idx = self._proxy_model.mapToSource(cur)
+            game = self._source_model.game_at(src_idx.row())
+            if game and game.id:
+                state["selected_game_id"] = game.id
+        return state
+
+    def restore_state(self, state: dict) -> None:
+        """Restore filter settings and selection from a snapshot produced by get_state()."""
+        if state is None:
+            self.select_first()
+            return
+
+        # View mode
+        view_mode = state.get("view_mode", VIEW_LIST)
+        if 0 <= view_mode <= 2:
+            self._switch_view(view_mode)
+
+        # Preset
+        self._preset_combo.blockSignals(True)
+        idx = self._preset_combo.findText(state.get("preset", PRESETS[0][0]))
+        self._preset_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._preset_combo.blockSignals(False)
+        self._proxy_model.set_preset(self._preset_combo.currentText())
+
+        # Genre
+        self._genre_combo.blockSignals(True)
+        idx = self._genre_combo.findText(state.get("genre", "All genres"))
+        self._genre_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._genre_combo.blockSignals(False)
+        genre_text = self._genre_combo.currentText()
+        self._proxy_model.set_genre_filter("" if genre_text == "All genres" else genre_text)
+
+        # Year
+        self._year_combo.blockSignals(True)
+        idx = self._year_combo.findText(state.get("year", "All years"))
+        self._year_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._year_combo.blockSignals(False)
+        year_text = self._year_combo.currentText()
+        try:
+            self._proxy_model.set_year_filter(int(year_text))
+        except ValueError:
+            self._proxy_model.set_year_filter(0)
+
+        # Rating
+        self._rating_combo.blockSignals(True)
+        idx = self._rating_combo.findText(state.get("rating", "All ratings"))
+        self._rating_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._rating_combo.blockSignals(False)
+        rating_text = self._rating_combo.currentText()
+        self._proxy_model.set_rating_filter("" if rating_text == "All ratings" else rating_text)
+
+        # Play mode
+        self._play_mode_combo.blockSignals(True)
+        idx = self._play_mode_combo.findText(state.get("play_mode", "All modes"))
+        self._play_mode_combo.setCurrentIndex(idx if idx >= 0 else 0)
+        self._play_mode_combo.blockSignals(False)
+        play_mode_text = self._play_mode_combo.currentText()
+        self._proxy_model.set_play_mode_filter(
+            "" if play_mode_text == "All modes" else play_mode_text
+        )
+
+        # Show mode (All / Installed / Favorites)
+        self._installed_combo.blockSignals(True)
+        show_mode = state.get("show_mode", 0)
+        self._installed_combo.setCurrentIndex(show_mode if 0 <= show_mode <= 2 else 0)
+        self._installed_combo.blockSignals(False)
+        self._proxy_model.set_show_mode(self._installed_combo.currentIndex())
+
+        # Search — reset on tab switch; uncomment the lines below to persist instead
+        # search_text = state.get("search", "")
+        # self._search.blockSignals(True)
+        # self._search.setText(search_text)
+        # self._search.blockSignals(False)
+        # self._proxy_model.setFilterFixedString(search_text)
+        self._search.blockSignals(True)
+        self._search.setText("")
+        self._search.blockSignals(False)
+        self._proxy_model.setFilterFixedString("")
+
+        self._update_count()
+
+        game_id = state.get("selected_game_id", "")
+        if game_id:
+            self._select_by_game_id(game_id)
+        else:
+            self.select_first()
+
+    def _select_by_game_id(self, game_id: str) -> None:
+        """Select the row matching game_id in the current (filtered) proxy model."""
+        for row in range(self._proxy_model.rowCount()):
+            idx = self._proxy_model.index(row, 0)
+            src_idx = self._proxy_model.mapToSource(idx)
+            game = self._source_model.game_at(src_idx.row())
+            if game and game.id == game_id:
+                self._shared_selection.setCurrentIndex(
+                    idx, QItemSelectionModel.SelectionFlag.ClearAndSelect
+                )
+                views = [self._list_view, self._grid_view, self._table_view]
+                views[self._view_stack.currentIndex()].scrollTo(
+                    idx, QAbstractItemView.ScrollHint.EnsureVisible
+                )
+                return
+        self.select_first()
+
     def set_library(self, library) -> None:
         """Swap in a new library (e.g. when switching projects) and repopulate."""
         self._library = library
@@ -942,4 +1068,4 @@ class GameListPanel(QWidget):
         self._preset_combo.setVisible(is_exodos)
         self._filter_sep.setVisible(is_exodos)
         self._populate()
-        self.select_first()
+        # Selection is handled by the caller via restore_state() after set_library()

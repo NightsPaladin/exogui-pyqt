@@ -1,11 +1,11 @@
 """
 launcher.py — Launch and install eXo collection games on macOS and Linux.
 
-Games are launched via eXo/util/launch_helper.sh which sets the required
-environment variables (gamedir, gamename, indexname, var) and delegates to
-the platform-appropriate launcher:
-  macOS: eXo/util/launch.msh
-  Linux: eXo/util/launch.bsh
+For supported collection types (eXoDOS, eXoWin3x, eXoScummVM, eXoAppleIIGS)
+games are launched via core.native_launch, which builds the emulator argv
+directly in Python without invoking any shell scripts.
+
+Other collection types fall back to eXo/util/launch_helper.sh.
 
 Install = extract the game's zip archive into the collection's game_data_subdir.
 """
@@ -27,6 +27,7 @@ from PyQt6.QtCore import QObject, QRunnable, QThreadPool, pyqtSignal, pyqtSlot
 
 from core.project import ProjectConfig, EXODOS
 from core import aria_index as _aria_index
+import core.native_launch as _native_launch
 from core.torrent import parse as _parse_torrent
 from core.debug import dbg
 
@@ -61,6 +62,56 @@ class LiteDownloadSignals(QObject):
 
 
 # ── runnable tasks ───────────────────────────────────────────────────────────
+
+class NativeLaunchTask(QRunnable):
+    """
+    Launch a game via a directly-built argv.
+
+    Bypasses all shell scripts — the argv is constructed by core.native_launch
+    from the collection configuration and game metadata.
+    """
+
+    def __init__(self, game_id: str, argv: list[str], cwd: str,
+                 signals: LaunchSignals,
+                 emulators: dict[str, str] | None = None):
+        super().__init__()
+        self.game_id   = game_id
+        self.argv      = argv
+        self.cwd       = cwd
+        self.signals   = signals
+        self._emulators = emulators or {}
+        self.setAutoDelete(True)
+
+    @pyqtSlot()
+    def run(self):
+        self.signals.started.emit(self.game_id)
+        try:
+            env = os.environ.copy()
+            if sys.platform == "darwin":
+                for _prefix in ("/opt/homebrew", "/usr/local"):
+                    for _sub in ("bin", "sbin"):
+                        _p = f"{_prefix}/{_sub}"
+                        if os.path.isdir(_p) and _p not in env.get("PATH", ""):
+                            env["PATH"] = _p + ":" + env["PATH"]
+            if sys.platform.startswith("linux"):
+                if "XDG_RUNTIME_DIR" not in env:
+                    try:
+                        xdg_dir = f"/run/user/{os.getuid()}"
+                        if os.path.isdir(xdg_dir):
+                            env["XDG_RUNTIME_DIR"] = xdg_dir
+                    except AttributeError:
+                        pass
+
+            from core.mac_shortcuts import disable_conflicting_shortcuts, restore_shortcuts
+            _saved = disable_conflicting_shortcuts()
+            try:
+                result = subprocess.run(self.argv, env=env, cwd=self.cwd)
+            finally:
+                restore_shortcuts(_saved)
+            self.signals.finished.emit(self.game_id, result.returncode)
+        except Exception as exc:
+            self.signals.error.emit(self.game_id, str(exc))
+
 
 class LaunchTask(QRunnable):
     def __init__(self, game_id: str, helper: str, gamedir: str, gamename: str,
@@ -155,12 +206,15 @@ class LaunchTask(QRunnable):
 
 class InstallTask(QRunnable):
     def __init__(self, game_id: str, zip_path: str, dest_dir: str,
-                 signals: InstallSignals):
+                 signals: InstallSignals, extra_zip_path: str = "",
+                 extra_extract_dir: str = ""):
         super().__init__()
         self.game_id = game_id
         self.zip_path = zip_path
         self.dest_dir = dest_dir
         self.signals = signals
+        self.extra_zip_path = extra_zip_path
+        self.extra_extract_dir = extra_extract_dir
         self.setAutoDelete(True)
 
     @pyqtSlot()
@@ -172,13 +226,24 @@ class InstallTask(QRunnable):
                 for i, member in enumerate(members):
                     zf.extract(member, self.dest_dir)
                     self.signals.progress.emit(self.game_id, i + 1, total)
-            self.signals.finished.emit(self.game_id, True, "")
         except Exception as exc:
             zip_name = os.path.basename(self.zip_path)
             self.signals.finished.emit(
                 self.game_id, False,
                 f"Failed to extract '{zip_name}':\n{exc}"
             )
+            return
+
+        if self.extra_zip_path and os.path.isfile(self.extra_zip_path):
+            extra_dest = self.extra_extract_dir or self.dest_dir
+            try:
+                with zipfile.ZipFile(self.extra_zip_path, "r") as zf:
+                    for member in zf.namelist():
+                        zf.extract(member, extra_dest)
+            except Exception:
+                pass  # GameData extras are optional
+
+        self.signals.finished.emit(self.game_id, True, "")
 
 
 class UninstallTask(QRunnable):
@@ -248,25 +313,31 @@ class FetchTask(QRunnable):
 
     def __init__(
         self,
-        game_id:         str,
-        gamename:        str,          # e.g. "Dune 2 - The Building of a Dynasty (1992)"
-        zip_dest_dir:    str,          # where to place the downloaded ZIP
-        extract_dir:     str,          # where to extract (usually same as zip_dest_dir)
-        aria_index_path: str,
-        torrent_path:    str,
-        zip_source_path: str,          # user-configured local/network path (may be "")
-        signals:         FetchSignals,
+        game_id:          str,
+        gamename:         str,          # e.g. "Dune 2 - The Building of a Dynasty (1992)"
+        zip_dest_dir:     str,          # where to place the downloaded ZIP
+        extract_dir:      str,          # where to extract (usually same as zip_dest_dir)
+        aria_index_path:  str,
+        torrent_path:     str,
+        zip_source_path:  str,          # user-configured local/network path (may be "")
+        signals:              FetchSignals,
+        gamedata_zip_dir:     str = "",  # Content/GameData/<project>/ on disk (may be "")
+        gamedata_extract_dir: str = "",  # collection root for GameData extraction (may be "")
+        gamedata_source_path: str = "",  # local/network GameData ZIP directory (may be "")
     ):
         super().__init__()
-        self.game_id         = game_id
-        self.gamename        = gamename
-        self.zip_dest_dir    = zip_dest_dir
-        self.extract_dir     = extract_dir
-        self.aria_index_path = aria_index_path
-        self.torrent_path    = torrent_path
-        self.zip_source_path = zip_source_path
-        self.signals         = signals
-        self._cancel         = threading.Event()
+        self.game_id          = game_id
+        self.gamename         = gamename
+        self.zip_dest_dir     = zip_dest_dir
+        self.extract_dir      = extract_dir
+        self.aria_index_path  = aria_index_path
+        self.torrent_path     = torrent_path
+        self.zip_source_path  = zip_source_path
+        self.signals          = signals
+        self.gamedata_zip_dir     = gamedata_zip_dir
+        self.gamedata_extract_dir = gamedata_extract_dir
+        self.gamedata_source_path = gamedata_source_path
+        self._cancel              = threading.Event()
         self._proc: Optional[subprocess.Popen] = None
         self.setAutoDelete(True)
 
@@ -284,8 +355,12 @@ class FetchTask(QRunnable):
     def run(self) -> None:
         zip_filename  = self.gamename + ".zip"
         final_zip     = os.path.join(self.zip_dest_dir, zip_filename)
+        gamedata_zip  = (
+            os.path.join(self.gamedata_zip_dir, zip_filename)
+            if self.gamedata_zip_dir else ""
+        )
 
-        # Phase 1: acquire ZIP ────────────────────────────────────────────────
+        # Phase 1: acquire game ZIP ───────────────────────────────────────────
         try:
             acquired = self._acquire(zip_filename, final_zip)
         except Exception as exc:
@@ -306,7 +381,7 @@ class FetchTask(QRunnable):
                 )
             return
 
-        # Phase 2: extract ────────────────────────────────────────────────────
+        # Phase 2: extract game ZIP ───────────────────────────────────────────
         self.signals.phase_changed.emit(self.game_id, "Extracting…")
         try:
             with zipfile.ZipFile(final_zip, "r") as zf:
@@ -324,6 +399,28 @@ class FetchTask(QRunnable):
                 f"Failed to extract '{zip_filename}':\n{exc}"
             )
             return
+
+        # Phase 3 & 4: GameData extras (best-effort, eXoDOS only) ────────────
+        if gamedata_zip and not self._cancel.is_set():
+            if not os.path.isfile(gamedata_zip):
+                try:
+                    self._acquire_media(zip_filename, gamedata_zip)
+                except Exception:
+                    pass
+            if not self._cancel.is_set() and os.path.isfile(gamedata_zip):
+                extras_dest = self.gamedata_extract_dir or self.extract_dir
+                self.signals.phase_changed.emit(self.game_id, "Extracting extras…")
+                try:
+                    with zipfile.ZipFile(gamedata_zip, "r") as zf:
+                        members = zf.namelist()
+                        total = len(members)
+                        for i, member in enumerate(members):
+                            if self._cancel.is_set():
+                                break
+                            zf.extract(member, extras_dest)
+                            self.signals.progress.emit(self.game_id, i + 1, total)
+                except Exception:
+                    pass  # extras are optional
 
         self.signals.finished.emit(self.game_id, True, "")
 
@@ -433,8 +530,7 @@ class FetchTask(QRunnable):
             argv = _aria_index.build_aria2c_command(
                 aria2c_cmd,
                 self.torrent_path,
-                file_index,
-                zip_filename,
+                [(file_index, zip_filename)],
             )
 
             env = os.environ.copy()
@@ -489,6 +585,99 @@ class FetchTask(QRunnable):
             shutil.move(downloaded, final_zip)
             return True
 
+    def _acquire_media(self, zip_filename: str, gamedata_zip: str) -> bool:
+        """Copy or download the GameData extras ZIP. Best-effort."""
+        if self._cancel.is_set():
+            return False
+
+        # 1. Local/network source
+        if self.gamedata_source_path:
+            source = os.path.join(self.gamedata_source_path, zip_filename)
+            if os.path.isfile(source):
+                self.signals.phase_changed.emit(self.game_id, "Copying extras…")
+                try:
+                    os.makedirs(os.path.dirname(gamedata_zip), exist_ok=True)
+                    shutil.copy2(source, gamedata_zip)
+                    return True
+                except OSError:
+                    pass  # fall through to torrent
+
+        # 2. Torrent fallback
+        if not self.torrent_path or not os.path.isfile(self.torrent_path):
+            return False
+        if self._cancel.is_set():
+            return False
+
+        aria2c_cmd = _aria_index.find_aria2c()
+        if not aria2c_cmd:
+            return False
+
+        index = _aria_index.load_index(self.aria_index_path)
+        entry = index.get(self.gamename)
+        if not entry or not entry.media_index:
+            return False
+
+        self.signals.phase_changed.emit(self.game_id, "Downloading extras via torrent…")
+        self.signals.progress.emit(self.game_id, 0, 100)
+
+        os.makedirs(os.path.dirname(gamedata_zip), exist_ok=True)
+
+        with tempfile.TemporaryDirectory(prefix="exogui_dl_") as tmpdir:
+            argv = _aria_index.build_aria2c_command(
+                aria2c_cmd,
+                self.torrent_path,
+                [(entry.media_index, zip_filename)],
+            )
+            env = os.environ.copy()
+            if sys.platform == "darwin":
+                for prefix in ("/opt/homebrew", "/usr/local"):
+                    for sub in ("bin", "sbin"):
+                        p = f"{prefix}/{sub}"
+                        if os.path.isdir(p) and p not in env.get("PATH", ""):
+                            env["PATH"] = p + ":" + env["PATH"]
+
+            try:
+                proc = subprocess.Popen(
+                    argv,
+                    cwd=tmpdir,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    env=env,
+                )
+                self._proc = proc
+                for line in proc.stdout:  # type: ignore[union-attr]
+                    if self._cancel.is_set():
+                        proc.terminate()
+                        break
+                    pct = _parse_aria_progress(line)
+                    if pct is not None:
+                        self.signals.progress.emit(self.game_id, pct, 100)
+                proc.wait()
+            except (OSError, subprocess.SubprocessError):
+                return False
+            finally:
+                self._proc = None
+
+            if proc.returncode != 0:
+                return False
+
+            downloaded = None
+            for dirpath, _, fnames in os.walk(tmpdir):
+                for fname in fnames:
+                    if fname == zip_filename:
+                        downloaded = os.path.join(dirpath, fname)
+                        break
+
+            if not downloaded or not os.path.isfile(downloaded):
+                return False
+            if os.path.getsize(downloaded) == 0:
+                return False
+
+            shutil.move(downloaded, gamedata_zip)
+            return True
+
+
 class SetupTask(QRunnable):
     """
     Extract already-downloaded Content/*.zip files into a collection root.
@@ -512,9 +701,16 @@ class SetupTask(QRunnable):
 
     @pyqtSlot()
     def run(self) -> None:
+        try:
+            self._run()
+        except Exception as exc:
+            self.signals.finished.emit(False, str(exc))
+
+    def _run(self) -> None:
         content_dir = os.path.join(self.collection_root, "Content")
         util_dir    = os.path.join(self.collection_root, "eXo", "util")
         os.makedirs(util_dir, exist_ok=True)
+        skipped: list[str] = []
 
         try:
             zips = sorted(os.listdir(content_dir))
@@ -533,24 +729,68 @@ class SetupTask(QRunnable):
             if fname == "LaunchBox.zip":
                 continue
             src = os.path.join(content_dir, fname)
+            if not zipfile.is_zipfile(src):
+                dbg(f"SetupTask: skipping {fname} (not a valid ZIP)")
+                skipped.append(fname)
+                continue
             self.signals.phase.emit(f"Extracting {fname}…")
             dbg(f"SetupTask: extracting {fname} → {self.collection_root}")
             self._extract_zip(src, self.collection_root)
 
-        # eXo/util/util*.zip: extract to eXo/util/
+        # Pass 1 — eXo/util/util*.zip and similar: extract to eXo/util/.
+        # OPT*.zip are Windows-only tools; skip entirely.
+        # EXT*.zip are deferred to pass 2 because they may not exist yet
+        # (they are nested inside util*.zip and appear only after extraction).
+        eXo_dir = os.path.join(self.collection_root, "eXo")
         if not self._cancel.is_set() and os.path.isdir(util_dir):
             for fname in sorted(os.listdir(util_dir)):
                 if self._cancel.is_set():
                     self.signals.cancelled.emit()
                     return
-                if fname.startswith("util") and fname.endswith(".zip"):
-                    src = os.path.join(util_dir, fname)
-                    self.signals.phase.emit(f"Extracting {fname}…")
-                    dbg(f"SetupTask: extracting {fname} → {util_dir}")
-                    self._extract_zip(src, util_dir)
+                if not fname.endswith(".zip"):
+                    continue
+                fupper = fname.upper()
+                if fupper.startswith("OPT") or fupper.startswith("EXT"):
+                    dbg(f"SetupTask: deferring/skipping {fname}")
+                    continue
+                src = os.path.join(util_dir, fname)
+                if not zipfile.is_zipfile(src):
+                    dbg(f"SetupTask: skipping {fname} (not a valid ZIP)")
+                    skipped.append(fname)
+                    continue
+                self.signals.phase.emit(f"Extracting {fname}…")
+                dbg(f"SetupTask: extracting {fname} → {util_dir}")
+                self._extract_zip(src, util_dir)
+
+        # Pass 2 — EXT*.zip: extract emulator assets (ROMs, fonts, …) to eXo/.
+        # These are unpacked from util*.zip in pass 1, so the directory is
+        # re-scanned here to pick them up.
+        if not self._cancel.is_set() and os.path.isdir(util_dir):
+            for fname in sorted(os.listdir(util_dir)):
+                if self._cancel.is_set():
+                    self.signals.cancelled.emit()
+                    return
+                if not (fname.upper().startswith("EXT") and fname.endswith(".zip")):
+                    continue
+                src = os.path.join(util_dir, fname)
+                if not zipfile.is_zipfile(src):
+                    dbg(f"SetupTask: skipping {fname} (not a valid ZIP)")
+                    skipped.append(fname)
+                    continue
+                self.signals.phase.emit(f"Extracting {fname}…")
+                dbg(f"SetupTask: extracting {fname} → {eXo_dir}")
+                self._extract_zip(src, eXo_dir)
 
         if not self._cancel.is_set():
-            self.signals.finished.emit(True, "Setup complete.")
+            if skipped:
+                msg = (
+                    "Setup complete, but the following files could not be extracted\n"
+                    "(they may be incomplete downloads):\n\n"
+                    + "\n".join(f"  • {f}" for f in skipped)
+                )
+                self.signals.finished.emit(True, msg)
+            else:
+                self.signals.finished.emit(True, "Setup complete.")
 
     def _extract_zip(self, zip_path: str, dest_dir: str) -> None:
         with zipfile.ZipFile(zip_path, "r") as zf:
@@ -639,11 +879,13 @@ class LiteDownloadTask(QRunnable):
             self.signals.cancelled.emit()
             return
 
-        # 3. Download into a persistent directory so aria2c can resume across runs.
-        # aria2c keeps .aria2 control files alongside partial data; on restart it
-        # verifies piece hashes and only fetches missing pieces.
-        dl_dir = os.path.join(self.collection_root, ".exogui_lite")
-        os.makedirs(dl_dir, exist_ok=True)
+        # 3. Download directly into the collection's parent directory so that
+        # aria2c places files at their final torrent paths
+        # (<parent>/<torrent_name>/Content/… and <parent>/<torrent_name>/eXo/util/…).
+        # This means pre-copied or previously downloaded zips are found by aria2c's
+        # piece-hash verification and skipped, and the zips are preserved in place
+        # after install rather than being discarded.
+        dl_dir = os.path.dirname(os.path.normpath(self.collection_root))
 
         self.signals.phase.emit("Downloading Lite files…")
         self.signals.progress.emit(0, 100)
@@ -661,7 +903,8 @@ class LiteDownloadTask(QRunnable):
                 env=env,
             )
             self._proc = proc
-            for line in proc.stdout:  # type: ignore[union-attr]
+            assert proc.stdout is not None
+            for line in proc.stdout:
                 if self._cancel.is_set():
                     proc.terminate()
                     break
@@ -687,12 +930,36 @@ class LiteDownloadTask(QRunnable):
             )
             return
 
-        # Install downloaded files; dl_dir is cleaned up on success.
+        # torrent_root resolves to collection_root since dl_dir is its parent.
         torrent_root = os.path.join(dl_dir, info.name)
         lite_paths = {f.path for f in info.files if f.index in set(lite_indices)}
         dbg(f"LiteDownload: installing from torrent_root={torrent_root}")
         dbg(f"LiteDownload: collection_root={self.collection_root}")
-        self._install(torrent_root, lite_paths, dl_dir)
+        self._install(torrent_root, lite_paths)
+
+        if not self._cancel.is_set():
+            self._index_collection()
+
+    def _index_collection(self) -> None:
+        """Copy the torrent into eXo/util/aria/ and generate index.txt."""
+        aria_dir = os.path.join(self.collection_root, "eXo", "util", "aria")
+        os.makedirs(aria_dir, exist_ok=True)
+
+        torrent_fname = os.path.basename(self.torrent_path)
+        dest_torrent = os.path.join(aria_dir, torrent_fname)
+
+        if not (os.path.exists(dest_torrent) and os.path.samefile(self.torrent_path, dest_torrent)):
+            self.signals.phase.emit("Copying torrent…")
+            dbg(f"LiteDownload: copying torrent → {dest_torrent}")
+            shutil.copy2(self.torrent_path, dest_torrent)
+
+        self.signals.phase.emit("Indexing torrent…")
+        index_path = os.path.join(aria_dir, "index.txt")
+        try:
+            count = _aria_index.build_index(dest_torrent, index_path)
+            dbg(f"LiteDownload: indexed {count:,} files → {index_path}")
+        except Exception as exc:
+            dbg(f"LiteDownload: index generation failed: {exc}")
 
     def _build_argv(
         self, aria2c_cmd: str, indices: list[int], out_dir: str
@@ -718,13 +985,11 @@ class LiteDownloadTask(QRunnable):
                         env["PATH"] = p + ":" + env["PATH"]
         return env
 
-    def _install(self, torrent_root: str, lite_paths: set[str], dl_dir: str = "") -> None:
-        """Extract/copy downloaded files into the collection root.
+    def _install(self, torrent_root: str, lite_paths: set[str]) -> None:
+        """Extract downloaded zips into the collection root.
 
-        dl_dir, if given, is the persistent download cache directory.  It is
-        removed after a successful install so it doesn't occupy disk space once
-        the files are in their final locations.  On cancel or error it is left
-        intact so the next run can resume the torrent download.
+        The zips remain at their torrent paths (Content/ and eXo/util/) after
+        extraction so that aria2c can verify and seed them on subsequent runs.
         """
         dest_util = os.path.join(self.collection_root, "eXo", "util")
         os.makedirs(dest_util, exist_ok=True)
@@ -745,6 +1010,9 @@ class LiteDownloadTask(QRunnable):
             if parts[0] == "Content" and len(parts) == 2:
                 fname = parts[1]
                 if fname.endswith(".zip"):
+                    if not zipfile.is_zipfile(src):
+                        dbg(f"LiteDownload:   skipping {fname} (not a valid ZIP)")
+                        continue
                     self.signals.phase.emit(f"Extracting {fname}…")
                     dbg(f"LiteDownload:   extracting {fname} → {self.collection_root}")
                     self._extract_zip(src, self.collection_root)
@@ -752,20 +1020,38 @@ class LiteDownloadTask(QRunnable):
             elif parts[0] == "eXo" and len(parts) >= 3 and parts[1] == "util":
                 fname = parts[-1]
                 if fname.endswith(".zip"):
+                    if not zipfile.is_zipfile(src):
+                        dbg(f"LiteDownload:   skipping {fname} (not a valid ZIP)")
+                        continue
                     self.signals.phase.emit(f"Extracting {fname}…")
                     dbg(f"LiteDownload:   extracting {fname} → {dest_util}")
                     self._extract_zip(src, dest_util)
                 else:
-                    dbg(f"LiteDownload:   copying {fname} → {dest_util}")
-                    shutil.copy2(src, os.path.join(dest_util, fname))
+                    dest = os.path.join(dest_util, fname)
+                    if not (os.path.exists(dest) and os.path.samefile(src, dest)):
+                        dbg(f"LiteDownload:   copying {fname} → {dest_util}")
+                        shutil.copy2(src, dest)
+
+        # Second pass — EXT*.zip: emulator assets (ROMs, fonts, …) nested
+        # inside util*.zip are only present in dest_util after the loop above.
+        # Extract them to eXo/ so paths like emulators/GSPlus/ROM1 resolve
+        # relative to the collection's eXo/ directory.
+        dest_eXo = os.path.join(self.collection_root, "eXo")
+        if not self._cancel.is_set() and os.path.isdir(dest_util):
+            for fname in sorted(os.listdir(dest_util)):
+                if self._cancel.is_set():
+                    self.signals.cancelled.emit()
+                    return
+                if not (fname.upper().startswith("EXT") and fname.endswith(".zip")):
+                    continue
+                src = os.path.join(dest_util, fname)
+                if not zipfile.is_zipfile(src):
+                    continue
+                self.signals.phase.emit(f"Extracting {fname}…")
+                dbg(f"LiteDownload:   extracting {fname} → {dest_eXo}")
+                self._extract_zip(src, dest_eXo)
 
         if not self._cancel.is_set():
-            if dl_dir and os.path.isdir(dl_dir):
-                self.signals.phase.emit("Cleaning up…")
-                try:
-                    shutil.rmtree(dl_dir)
-                except OSError:
-                    pass  # best-effort; stale cache is harmless
             self.signals.finished.emit(True, "Lite download complete.")
 
     def _extract_zip(self, zip_path: str, dest_dir: str) -> None:
@@ -864,22 +1150,48 @@ class Launcher(QObject):
 
     # ── public ────────────────────────────────────────────────────────────────
 
-    def launch(self, game) -> bool:
+    def launch(self, game, variant: str = "", launch_variant=None) -> bool:
         """
-        Launch *game* via launch_helper.sh → launch.msh (macOS) or launch.bsh (Linux).
+        Launch *game* on macOS / Linux.
 
-        Returns False if the game is not installed or the helper cannot be found.
+        *launch_variant* (a ``LaunchVariant`` from game_library) is the choice
+        made by the user in the pre-launch dialog.  When provided it overrides
+        the default conf or engine selection.
+
+        *variant* is the platform subdirectory name for multi-platform ScummVM
+        games (e.g. "Blue's ABC Time (Windows)"); pass "" to auto-detect.
+
+        For supported collection types (eXoDOS, eXoWin3x, eXoScummVM,
+        eXoAppleIIGS) the emulator argv is built directly in Python via
+        core.native_launch, bypassing all shell scripts.  Other collection
+        types fall back to launch_helper.sh.
+
+        Returns False if the launch cannot be started.
         """
+        if _native_launch.is_supported(self._config):
+            argv, err = _native_launch.build_argv(
+                self._config, self.root, game, self._emulators, variant,
+                launch_variant=launch_variant,
+            )
+            if argv is None:
+                self.launch_error.emit(game.id, err or f"Cannot launch '{game.title}'.")
+                return False
+            cwd = _native_launch.get_cwd(self._config, self.root)
+            task = NativeLaunchTask(
+                game.id, argv, cwd, self._launch_signals, emulators=self._emulators
+            )
+            self._pool.start(task)
+            return True
+
+        # Fall back to shell helper for unsupported collection types
         gamedir, gamename = self._find_gamedir_and_name(game)
         if not gamedir:
             self.launch_error.emit(game.id, f"Game folder not found for '{game.title}'")
             return False
-
         helper = os.path.join(self.root, "eXo", "util", "launch_helper.sh")
         if not os.path.isfile(helper):
             self.launch_error.emit(game.id, "launch_helper.sh not found")
             return False
-
         task = LaunchTask(game.id, helper, gamedir, gamename, self._launch_signals,
                           emulators=self._emulators)
         self._pool.start(task)
@@ -909,7 +1221,17 @@ class Launcher(QObject):
         # Extract to the project's game_data_subdir so data lands at
         # <game_data_subdir>/<gamedir>/ — where the launch scripts expect it.
         dest_dir = self._config.abs_game_data(self.root)
-        task = InstallTask(game.id, zip_path, dest_dir, self._install_signals)
+
+        extra_zip = ""
+        if self._config.gamedata_content_subdir and expected_name:
+            gd_dir = os.path.join(self.root, *self._config.gamedata_content_subdir.split("/"))
+            candidate = os.path.join(gd_dir, expected_name + ".zip")
+            if os.path.isfile(candidate):
+                extra_zip = candidate
+
+        task = InstallTask(game.id, zip_path, dest_dir, self._install_signals,
+                           extra_zip_path=extra_zip,
+                           extra_extract_dir=self.root)
         self._pool.start(task)
         return True
 
@@ -951,31 +1273,51 @@ class Launcher(QObject):
 
         dest_dir = self._config.abs_game_data(self.root)
 
-        # Resolve effective ZIP source: if the user pointed to a project root
-        # (e.g. /Volumes/BigDrive/eXoDOS), automatically descend into the
-        # game_data_subdir (e.g. eXo/eXoDOS/) where the ZIPs actually live.
+        # Resolve effective game ZIP source: if the user pointed to a collection
+        # root (e.g. /Volumes/BigDrive/eXoDOS), descend into game_data_subdir
+        # (e.g. eXo/eXoDOS/) where the ZIPs actually live.
         # If they pointed directly at a flat directory of ZIPs, use it as-is.
         effective_source = self._zip_source_path
+        gamedata_source_path = ""
         if effective_source:
             subdir = self._config.abs_game_data(effective_source)
             if os.path.isdir(subdir):
                 effective_source = subdir
+            # Resolve GameData extras source from the same collection root.
+            if self._config.gamedata_content_subdir:
+                gd_candidate = os.path.join(
+                    self._zip_source_path,
+                    *self._config.gamedata_content_subdir.split("/"),
+                )
+                if os.path.isdir(gd_candidate):
+                    gamedata_source_path = gd_candidate
 
         # Use the user-configured torrent path; fall back to the in-collection path.
         effective_torrent = self._torrent_path or self._config.torrent_path(self.root)
+
+        gamedata_zip_dir = ""
+        if self._config.gamedata_content_subdir:
+            gamedata_zip_dir = os.path.join(
+                self.root, *self._config.gamedata_content_subdir.split("/")
+            )
+
         dbg(f"Launcher.fetch: gamename={gamename!r}")
         dbg(f"Launcher.fetch: torrent={effective_torrent!r}")
         dbg(f"Launcher.fetch: zip_source={effective_source!r}")
         dbg(f"Launcher.fetch: dest_dir={dest_dir!r}")
+        dbg(f"Launcher.fetch: gamedata_zip_dir={gamedata_zip_dir!r}")
         task = FetchTask(
-            game_id         = game.id,
-            gamename        = gamename,
-            zip_dest_dir    = dest_dir,
-            extract_dir     = dest_dir,
-            aria_index_path = self._config.aria_index_path(self.root),
-            torrent_path    = effective_torrent,
-            zip_source_path = effective_source,
-            signals         = self._fetch_signals,
+            game_id              = game.id,
+            gamename             = gamename,
+            zip_dest_dir         = dest_dir,
+            extract_dir          = dest_dir,
+            aria_index_path      = self._config.aria_index_path(self.root),
+            torrent_path         = effective_torrent,
+            zip_source_path      = effective_source,
+            gamedata_zip_dir     = gamedata_zip_dir,
+            gamedata_extract_dir = self.root,
+            gamedata_source_path = gamedata_source_path,
+            signals              = self._fetch_signals,
         )
         self._active_fetch_task = task
         self._pool.start(task)
@@ -1011,6 +1353,11 @@ class Launcher(QObject):
         self._active_lite_task = task
         self._pool.start(task)
         return True
+
+    @property
+    def is_lite_downloading(self) -> bool:
+        """True while a Lite download or setup task is in progress."""
+        return self._active_lite_task is not None
 
     def cancel_lite(self) -> None:
         """Cancel the currently active Lite download, if any."""

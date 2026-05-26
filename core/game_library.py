@@ -54,6 +54,22 @@ _RE_YEAR_SUFFIX = re.compile(r"\s*\(\d{4}\)\s*$")
 _RE_RELEASE_YEAR = re.compile(r"(\d{4})")
 _RE_INSTALL_YEAR_SCRIPT = re.compile(r"\(\d{4}\)\.(bsh|msh|command|sh)$")
 
+# Exception.bsh variant-menu parsing
+_RE_VARIANT_ECHO    = re.compile(
+    r'echo\s+"Press\s+(\d+)\s+(?:to\s+play\s+[^"]+?using\s+|for\s+|to\s+)(.*?)"',
+    re.IGNORECASE,
+)
+_RE_VARIANT_GOTO    = re.compile(
+    r'\[\s*\$errorlevel\s*==\s*[\'"](\d+)[\'"]\s*\]\s*&&\s*goto\s+(\w+)',
+    re.IGNORECASE,
+)
+_RE_VARIANT_LABEL   = re.compile(r'^:\s*(\w+)\s*$', re.MULTILINE)
+_RE_VARIANT_DOSBOX  = re.compile(r'eval\s+".*?\$[{(]?[Dd][Oo][Ss][Bb][Oo][Xx]', re.IGNORECASE)
+_RE_VARIANT_SCUMMVM = re.compile(r'flatpak\s+run\s+com\.retro_exo\.scummvm', re.IGNORECASE)
+_RE_VARIANT_CONF    = re.compile(r'/(dosbox[^"\'\\/ ]*\.conf)(?:["\' \\]|$)', re.IGNORECASE)
+_RE_VARIANT_SCUMMVM_PATH = re.compile(r'-p\./([^\s]+)')
+_RE_LINUX_CONF      = re.compile(r'_linux(\.conf)$', re.IGNORECASE)
+
 from core.project import ProjectConfig, EXODOS
 from core import aria_index as _aria_index
 from core.debug import dbg
@@ -265,15 +281,43 @@ _IS_WINDOWS = sys.platform == "win32"
 
 # ── emulator display map ──────────────────────────────────────────────────────
 # Path to the plain-text mapping file that lives alongside this package.
-_APP_DIR             = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_APP_DIR              = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 _EMU_DISPLAY_MAP_PATH = os.path.join(_APP_DIR, "emulator_display_map.txt")
+_MACOS_MAP_PATH       = os.path.join(_APP_DIR, "emulator_macos_map.txt")
 
 # ── disk cache ────────────────────────────────────────────────────────────────
 # Bump _CACHE_VERSION whenever the Game dataclass or resolution logic changes
 # in a way that makes old cache files incompatible.
 # Cache lives inside the app directory so nothing is written to ~/.cache.
-_CACHE_VERSION = 6
+_CACHE_VERSION = 9
 _CACHE_BASE    = os.path.join(_APP_DIR, ".cache", "library")
+
+
+@lru_cache(maxsize=1)
+def _load_macos_emu_map() -> dict[str, str]:
+    """Load emulator_macos_map.txt into a {linux/win_cmd: macos_name} dict."""
+    result: dict[str, str] = {}
+    try:
+        with open(_MACOS_MAP_PATH, "r", encoding="utf-8") as fh:
+            for line in fh:
+                stripped = line.strip()
+                if not stripped or stripped.startswith("#") or "=" not in stripped:
+                    continue
+                key, _, val = stripped.partition("=")
+                key, val = key.strip(), val.strip()
+                if key and val:
+                    result[key] = val
+    except OSError:
+        pass
+    return result
+
+
+def _map_linux_cmd_to_macos(cmd: str) -> str:
+    """Translate a Linux/Windows emulator command to its macOS name, or '' if unavailable."""
+    mapped = _load_macos_emu_map().get(cmd)
+    if not mapped or mapped == "unavailable":
+        return ""
+    return mapped
 
 
 @lru_cache(maxsize=1)
@@ -323,6 +367,17 @@ def emulator_display_name(raw: str) -> str:
 
 
 # ── data model ───────────────────────────────────────────────────────────────
+
+@dataclass
+class LaunchVariant:
+    """One launch option parsed from an exception.bsh / exception.msh file."""
+    label: str              # human-readable from echo line e.g. "DOSBox (EGA)"
+    engine: str             # "dosbox" | "scummvm"
+    conf: str = ""          # DOSBox: macOS conf filename override e.g. "dosboxH.conf"
+    scummvm_id: str = ""    # ScummVM: game id e.g. "mortevielle"
+    scummvm_path: str = ""  # ScummVM: path relative to collection eXo/ dir
+    extra_args: list = field(default_factory=list)  # e.g. ["--language=en"]
+
 
 @dataclass
 class Extra:
@@ -396,6 +451,7 @@ class Game:
     image_paths: dict = field(default_factory=dict)   # type→abs_path
     compat_note: str = ""       # non-empty → game has limited/no macOS support
     extras: list = field(default_factory=list)        # list[Extra]
+    launch_variants: list = field(default_factory=list)  # list[LaunchVariant]
 
     @property
     def emulator_display(self) -> str:
@@ -428,6 +484,126 @@ class Game:
             if isinstance(first, str):
                 return first
         return ""
+
+
+# ── exception.bsh variant parsing ────────────────────────────────────────────
+
+def _parse_exception_variants(content: str) -> list:
+    """
+    Parse an exception.bsh file and return a list[LaunchVariant].
+
+    Returns [] if there is no interactive menu (wine-helper games, etc.).
+    Returns a single-item list when the script is a direct launch (no menu)
+    but invokes ScummVM — so the native launcher can use the correct path+id.
+    Returns a multi-item list when there is a menu with multiple choices.
+    """
+    # ── find the boundary before label sections start ─────────────────────────
+    # Only parse echo+goto from the preamble (before `: label` lines) so that
+    # nested sub-menus inside label sections don't pollute the top-level menu.
+    first_label_m = _RE_VARIANT_LABEL.search(content)
+    preamble = content[:first_label_m.start()] if first_label_m else content
+
+    # ── collect echo "Press N ..." entries in file order ─────────────────────
+    echo_entries: list[tuple[str, str]] = []  # (key, description)
+    for m in _RE_VARIANT_ECHO.finditer(preamble):
+        key, desc = m.group(1), m.group(2).strip()
+        echo_entries.append((key, desc))
+
+    # ── collect errorlevel→goto mappings ─────────────────────────────────────
+    goto_map: dict[str, str] = {}  # key → label name
+    for m in _RE_VARIANT_GOTO.finditer(preamble):
+        key, label = m.group(1), m.group(2).lower()
+        goto_map[key] = label
+
+    # ── split file into label sections ────────────────────────────────────────
+    sections: dict[str, str] = {}  # label → section content (text after label line)
+    label_positions = list(_RE_VARIANT_LABEL.finditer(content))
+    for i, lm in enumerate(label_positions):
+        label = lm.group(1).lower()
+        start = lm.end()
+        end = label_positions[i + 1].start() if i + 1 < len(label_positions) else len(content)
+        sections[label] = content[start:end]
+
+    def _parse_section(section_content: str, depth: int = 0) -> "LaunchVariant | None":
+        """Extract a LaunchVariant from a label's section content.
+
+        *depth* limits recursion when a section contains a nested sub-menu
+        (e.g. mi1's scummvm section that has Original vs Special Edition tracks).
+        """
+        for line in section_content.splitlines():
+            line = line.strip()
+            if _RE_VARIANT_SCUMMVM.search(line):
+                path_m = _RE_VARIANT_SCUMMVM_PATH.search(line)
+                scummvm_path = path_m.group(1) if path_m else ""
+                # Game id is the last token that doesn't start with '-'
+                tokens = line.split()
+                scummvm_id = ""
+                for tok in reversed(tokens):
+                    if not tok.startswith("-"):
+                        scummvm_id = tok
+                        break
+                # Extra args: --option=value or --option value pairs
+                extra: list[str] = []
+                for tok in tokens:
+                    if tok.startswith("--language="):
+                        extra.append(tok)
+                return LaunchVariant(
+                    label="",  # filled in by caller
+                    engine="scummvm",
+                    scummvm_id=scummvm_id,
+                    scummvm_path=scummvm_path,
+                    extra_args=extra,
+                )
+            if _RE_VARIANT_DOSBOX.search(line):
+                conf_m = _RE_VARIANT_CONF.search(line)
+                conf_linux = conf_m.group(1) if conf_m else "dosbox_linux.conf"
+                conf_macos = _RE_LINUX_CONF.sub(r'\1', conf_linux)
+                return LaunchVariant(
+                    label="",  # filled in by caller
+                    engine="dosbox",
+                    conf=conf_macos,
+                )
+        # No direct command found — check for a nested sub-menu and use its
+        # first reachable label (handles mi1's nested ScummVM track choice).
+        if depth == 0:
+            sub_m = _RE_VARIANT_GOTO.search(section_content)
+            if sub_m:
+                sub_label = sub_m.group(2).lower()
+                if sub_label != "end":
+                    sub_section = sections.get(sub_label, "")
+                    return _parse_section(sub_section, depth=1)
+        return None
+
+    variants: list[LaunchVariant] = []
+
+    if echo_entries and goto_map:
+        # ── menu-driven script ────────────────────────────────────────────────
+        for key, desc in echo_entries:
+            target = goto_map.get(key, "")
+            if not target or target == "end":
+                continue  # quit button or unrouted
+            section = sections.get(target, "")
+            v = _parse_section(section)
+            if v is not None:
+                v.label = desc
+                variants.append(v)
+    else:
+        # ── direct launch (no menu) — look for a top-level ScummVM call ──────
+        # This covers games like 120Deg / gnomer that bypass the menu and go
+        # straight to ScummVM.  We return a single variant so the native
+        # launcher knows the correct path + game id (otherwise it would fall
+        # back to scummvm.txt which may not have an entry for these titles).
+        main_body = content
+        # Strip everything before the first `: label` section (boilerplate)
+        first_label = _RE_VARIANT_LABEL.search(content)
+        if first_label:
+            main_body = content[:first_label.start()]
+        v = _parse_section(main_body)
+        if v is not None:
+            v.label = "ScummVM"
+            variants.append(v)
+
+    return variants
 
 
 # ── library ──────────────────────────────────────────────────────────────────
@@ -502,6 +678,7 @@ class GameLibrary:
             type_files = image_f.result()
 
         self._resolve_installation()
+        self._load_exception_variants()
         self._resolve_images(type_files)
         self._resolve_extras()
         self._resolve_collection_media()
@@ -560,18 +737,20 @@ class GameLibrary:
         even when the collection lives on a shared drive.
         """
         if _IS_LINUX:
-            emu_file = "dosbox_linux.txt"
+            emu_files = ["dosbox_linux.txt"]
         elif _IS_WINDOWS:
-            emu_file = "dosbox.txt"
+            emu_files = ["dosbox.txt"]
         else:
-            emu_file = "dosbox_macos.txt"
+            # macOS reads both: dosbox_macos.txt for explicit overrides,
+            # dosbox_linux.txt as fallback translated via emulator_macos_map.txt.
+            emu_files = ["dosbox_macos.txt", "dosbox_linux.txt"]
         paths = [
             self._config.xml_path(self.root, self.xml_mode),
             self._image_base,
             self._dos_base,
             self._config.abs_music_base(self.root),
             self._config.abs_video_base(self.root),
-            os.path.join(self.root, "eXo", "util", emu_file),
+            *[os.path.join(self.root, "eXo", "util", f) for f in emu_files],
         ]
         parts = [self._config.id, self.xml_mode, str(_CACHE_VERSION), sys.platform]
         for p in paths:
@@ -632,6 +811,38 @@ class GameLibrary:
 
     # ── private ───────────────────────────────────────────────────────────────
 
+    def _load_exception_variants(self) -> None:
+        """
+        Parse exception.bsh files in the scripts directory and populate
+        game.launch_variants for any games that have them.
+
+        Only runs for collections that use scripts (eXoDOS, eXoWin3x, etc.).
+        Silently skips games whose exception file cannot be parsed.
+        """
+        if not self._dos_base or not os.path.isdir(self._dos_base):
+            return
+        # Build a fast lookup: game_dir.lower() → Game
+        by_dir = {g.game_dir.lower(): g for g in self.games if g.game_dir}
+        for game_dir_name in os.listdir(self._dos_base):
+            key = game_dir_name.lower()
+            if key not in by_dir:
+                continue
+            game = by_dir[key]
+            for exc_name in ("exception.bsh", "exception.msh"):
+                exc_path = os.path.join(self._dos_base, game_dir_name, exc_name)
+                if not os.path.isfile(exc_path):
+                    continue
+                try:
+                    with open(exc_path, errors="replace") as fh:
+                        content = fh.read()
+                except OSError:
+                    break
+                variants = _parse_exception_variants(content)
+                if variants:
+                    game.launch_variants = variants
+                    dbg(f"[{self._config.id}] {game_dir_name}: {len(variants)} launch variant(s)")
+                break  # only process first exception file found per game
+
     def _load_emulator_map(self) -> None:
         """
         Load the platform-appropriate dosbox_*.txt → {lower_title: emulator_command}
@@ -654,20 +865,43 @@ class GameLibrary:
             primary_file = "dosbox_macos.txt"
         path = os.path.join(self.root, "eXo", "util", primary_file)
         dbg(f"[{self._config.id}] emulator map: looking for {primary_file} at {path}")
-        if not os.path.exists(path):
-            dbg(f"[{self._config.id}] emulator map: file not found — using default emulator '{self._config.default_emulator}'")
-            return
-        with open(path, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if ":" not in line:
-                    continue
-                title_with_year, _, emulator = line.partition(":")
-                title = _RE_YEAR_SUFFIX.sub("", title_with_year).strip()
-                emu = emulator.strip()
-                self._emulator_map[title.lower()] = emu
-                self._emulator_map[title_with_year.strip().lower()] = emu
-        dbg(f"[{self._config.id}] emulator map: loaded {len(self._emulator_map)} entries")
+        if os.path.exists(path):
+            with open(path, "r", errors="replace") as fh:
+                for raw in fh:
+                    line = raw.strip()
+                    if ":" not in line:
+                        continue
+                    title_with_year, _, emulator = line.partition(":")
+                    title = _RE_YEAR_SUFFIX.sub("", title_with_year).strip()
+                    emu = emulator.strip()
+                    self._emulator_map[title.lower()] = emu
+                    self._emulator_map[title_with_year.strip().lower()] = emu
+            dbg(f"[{self._config.id}] emulator map: loaded {len(self._emulator_map)} entries from {primary_file}")
+        else:
+            dbg(f"[{self._config.id}] emulator map: {primary_file} not found")
+
+        # On macOS: supplement _emulator_map from dosbox_linux.txt translated via
+        # emulator_macos_map.txt.  Fills in titles absent from dosbox_macos.txt and
+        # is the sole source when dosbox_macos.txt does not exist at all.
+        # An explicit dosbox_macos.txt entry always wins (checked via `not in` guard).
+        if not _IS_LINUX and not _IS_WINDOWS:
+            linux_path = os.path.join(self.root, "eXo", "util", "dosbox_linux.txt")
+            if os.path.exists(linux_path):
+                with open(linux_path, "r", errors="replace") as fh:
+                    for raw in fh:
+                        line = raw.strip()
+                        if ":" not in line:
+                            continue
+                        title_with_year, _, linux_cmd = line.partition(":")
+                        title = _RE_YEAR_SUFFIX.sub("", title_with_year).strip()
+                        title_key = title.lower()
+                        year_key = title_with_year.strip().lower()
+                        if title_key not in self._emulator_map:
+                            macos_name = _map_linux_cmd_to_macos(linux_cmd.strip())
+                            if macos_name:
+                                self._emulator_map[title_key] = macos_name
+                                self._emulator_map[year_key] = macos_name
+                dbg(f"[{self._config.id}] emulator map: {len(self._emulator_map)} entries after Linux supplement")
 
         # Scan exception.sh/bsh files in the !dos directory for games that invoke
         # the Wine flatpak with a Windows DOSBox ECE binary.
@@ -1252,3 +1486,57 @@ class GameLibrary:
             except OSError:
                 pass
             game.extras = items
+
+    def refresh_game_extras(self, game: "Game") -> None:
+        """Re-scan extras, music, and video for one game after installation."""
+        items: list[Extra] = []
+        if game.game_dir:
+            extras_dir = os.path.join(self._dos_base, game.game_dir, "Extras")
+            if os.path.isdir(extras_dir):
+                try:
+                    for fname in sorted(os.listdir(extras_dir)):
+                        if fname.startswith("._") or fname.startswith("."):
+                            continue
+                        ext = os.path.splitext(fname)[1].lower()
+                        if ext in _EXTRA_SKIP_EXTS:
+                            continue
+                        kind = EXTRA_KINDS.get(ext.lstrip("."), "other")
+                        items.append(Extra(
+                            name=os.path.splitext(fname)[0],
+                            path=os.path.join(extras_dir, fname),
+                            kind=kind,
+                            ext=ext.lstrip("."),
+                        ))
+                except OSError:
+                    pass
+        game.extras = items
+
+        music_index = self._index_flat_media_files(
+            self._config.abs_music_base(self.root),
+            _COLLECTION_MUSIC_EXTENSIONS,
+        )
+        video_index = self._index_flat_media_files(
+            self._config.abs_video_base(self.root),
+            _COLLECTION_VIDEO_EXTENSIONS,
+        )
+        candidate_groups = self._candidate_stem_groups(
+            self._collection_media_candidate_bases(game)
+        )
+        media_items = list(game.extras)
+        seen_paths = {e.path for e in media_items}
+
+        for path in self._all_image_matches(video_index, candidate_groups):
+            if path not in seen_paths:
+                stem, ext = os.path.splitext(os.path.basename(path))
+                media_items.append(Extra(name=stem, path=path, kind="video",
+                                         ext=ext.lstrip(".").lower()))
+                seen_paths.add(path)
+
+        for path in self._all_image_matches(music_index, candidate_groups):
+            if path not in seen_paths:
+                stem, ext = os.path.splitext(os.path.basename(path))
+                media_items.append(Extra(name=stem, path=path, kind="audio",
+                                         ext=ext.lstrip(".").lower()))
+                seen_paths.add(path)
+
+        game.extras = media_items

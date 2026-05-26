@@ -24,8 +24,6 @@ from pathlib import Path
 from PyQt6.QtGui import QColor, QPalette
 from PyQt6.QtWidgets import QApplication
 
-from core import debug
-
 
 # ── theme directory ───────────────────────────────────────────────────────────
 
@@ -88,6 +86,45 @@ class ThemeColors:
 
     # ── derived helpers ───────────────────────────────────────────────────────
 
+    @property
+    def selection_bg(self) -> str:
+        """Desaturated version of the accent used as the list-selection background.
+
+        Vivid/neon accents (S > 0.65) are toned down so the selected row
+        blends with the theme rather than clashing. Accents that are already
+        muted pass through unchanged, so Dark and Light are unaffected.
+        """
+        try:
+            import colorsys
+            h_hex = self.accent.lstrip('#')
+            r, g, b = int(h_hex[0:2],16)/255, int(h_hex[2:4],16)/255, int(h_hex[4:6],16)/255
+            h, l, s = colorsys.rgb_to_hls(r, g, b)
+            if s <= 0.65:
+                return self.accent
+            nr, ng, nb = colorsys.hls_to_rgb(h, l, s * 0.55)
+            return '#{:02x}{:02x}{:02x}'.format(round(nr*255), round(ng*255), round(nb*255))
+        except Exception:
+            return self.accent
+
+    @property
+    def text_on_accent(self) -> str:
+        """Black or white, whichever contrasts better against the accent colour.
+
+        Uses WCAG relative luminance so that light-coloured accents (yellow,
+        light-green, light-teal) get dark text instead of the theme's
+        text_hi (which is usually light on dark themes and would be invisible
+        against a light-coloured progress-bar chunk).
+        """
+        try:
+            h = self.accent.lstrip("#")
+            r, g, b = int(h[0:2], 16) / 255, int(h[2:4], 16) / 255, int(h[4:6], 16) / 255
+            def _lin(c: float) -> float:
+                return c / 12.92 if c <= 0.04045 else ((c + 0.055) / 1.055) ** 2.4
+            L = 0.2126 * _lin(r) + 0.7152 * _lin(g) + 0.0722 * _lin(b)
+            return "#000000" if L > 0.179 else "#ffffff"
+        except Exception:
+            return "#ffffff"
+
     def palette(self) -> QPalette:
         R = QPalette.ColorRole
         G = QPalette.ColorGroup
@@ -99,8 +136,8 @@ class ThemeColors:
         p.setColor(R.Text,            QColor(self.text_hi))
         p.setColor(R.Button,          QColor(self.bg_card))
         p.setColor(R.ButtonText,      QColor(self.text_hi))
-        p.setColor(R.Highlight,       QColor(self.accent))
-        p.setColor(R.HighlightedText, QColor("#ffffff"))
+        p.setColor(R.Highlight,       QColor(self.selection_bg))
+        p.setColor(R.HighlightedText, QColor(self.text_on_accent))
         p.setColor(R.ToolTipBase,     QColor(self.bg_input))
         p.setColor(R.ToolTipText,     QColor(self.text_hi))
         p.setColor(R.Mid,             QColor(self.text_lo))
@@ -177,7 +214,7 @@ QProgressBar {{
     border: 1px solid {t.border};
     border-radius: 4px;
     text-align: center;
-    color: {t.text_hi};
+    color: {t.text_on_accent};
 }}
 QProgressBar::chunk {{
     background: {a};
@@ -198,8 +235,7 @@ def _load_themes() -> dict[str, ThemeColors]:
     """Scan THEMES_DIR for *.json files and return name → ThemeColors map."""
     result: dict[str, ThemeColors] = {}
     if not THEMES_DIR.exists():
-        if debug.enabled:
-            print(f"[themes] themes directory not found: {THEMES_DIR}", file=sys.stderr)
+        print(f"[themes] themes directory not found: {THEMES_DIR}", file=sys.stderr)
         return result
     for path in sorted(THEMES_DIR.glob("*.json")):
         if path.name.startswith("."):
@@ -210,8 +246,7 @@ def _load_themes() -> dict[str, ThemeColors]:
             t = ThemeColors.from_dict(data)
             result[t.name] = t
         except Exception as exc:
-            if debug.enabled:
-                print(f"[themes] Skipping {path.name}: {exc}", file=sys.stderr)
+            print(f"[themes] Skipping {path.name}: {exc}", file=sys.stderr)
     return result
 
 

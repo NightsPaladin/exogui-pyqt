@@ -1,22 +1,20 @@
 """
-debug.py — Global debug-mode flag.
+debug.py — Global debug flag and logging helper.
 
-Set to True by passing -d / --debug on the command line (handled in main.py).
-Import this wherever conditional debug output is needed:
+Enable with the --debug CLI flag:
+    python3 main.py --debug
 
-    from core import debug
-    if debug.enabled:
-        print("[component] ...", file=sys.stderr)
+All dbg() calls are no-ops when DEBUG is False (the default).
 """
 
 from __future__ import annotations
 
 import sys
 
-enabled: bool = False
+DEBUG: bool = False
 
 
-def dbg(message: str) -> None:
-    """Print *message* to stderr when debug logging is enabled."""
-    if enabled:
-        print(message, file=sys.stderr)
+def dbg(*args, **kwargs) -> None:
+    """Print a debug message to stderr when DEBUG is True."""
+    if DEBUG:
+        print("[DEBUG]", *args, file=sys.stderr, **kwargs)

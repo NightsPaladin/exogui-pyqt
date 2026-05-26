@@ -1,0 +1,85 @@
+# emulator_macos_map.txt — Windows/Linux to macOS emulator substitution table
+#
+# Maps emulator commands from eXo collection Windows (.bat) and Linux (.bsh)
+# scripts to their nearest macOS native equivalent.
+#
+# Intended use: when no dosbox_macos.txt entry exists for a game, look up the
+# Linux command from dosbox_linux.txt (or the Windows command from dosbox.txt /
+# appleIIGS.txt) here to determine the correct macOS emulator to invoke.
+#
+# Format:  <linux_or_windows_command> = <macos_emulator_name>
+#
+# <macos_emulator_name> must match an EmulatorSpec.name in emulator_deps.py
+# (e.g. "dosbox-staging", "dosbox-x", "scummvm") or be a bare binary name
+# resolvable via PATH.  Use "unavailable" when no macOS equivalent exists.
+#
+# ── eXoDOS · eXoWin3x · eXoDemoScene — DOSBox (Linux flatpak) ───────────────
+flatpak run com.retro_exo.dosbox-074r3-1                                   = dosbox-staging
+flatpak run com.retro_exo.dosbox-ece-r4301                                 = dosbox-staging
+flatpak run com.retro_exo.dosbox-ece-r4358                                 = dosbox-staging
+flatpak run com.retro_exo.dosbox-ece-r4482                                 = dosbox-staging
+flatpak run com.retro_exo.dosbox-staging-081-2                             = dosbox-staging
+flatpak run com.retro_exo.dosbox-staging-082-0                             = dosbox-staging
+flatpak run com.retro_exo.dosbox-x-08220                                   = dosbox-x
+flatpak run com.retro_exo.dosbox-x-20240701                                = dosbox-x
+#
+# DOSBox variants running under Wine on Linux — map to native macOS builds.
+# Daum → dosbox-x (closest feature parity); vanilla/ECE/GunStick → staging.
+flatpak run com.retro_exo.wine emulators/dosbox/DOSBox.exe                 = dosbox-staging
+flatpak run com.retro_exo.wine emulators/dosbox/daum/dosbox.exe            = dosbox-x
+flatpak run com.retro_exo.wine emulators/dosbox/GunStick_dosbox/dosbox.exe = dosbox-staging
+flatpak run com.retro_exo.wine emulators/dosbox/ece4230/dosbox.exe         = dosbox-staging
+flatpak run com.retro_exo.wine emulators/dosbox/ece4481/dosbox.exe         = dosbox-staging
+
+# ── eXoDOS · eXoWin3x — DOSBox (Windows .bat) ──────────────────────────────
+dosbox.exe                                                                  = dosbox-staging
+daum\dosbox.exe                                                             = dosbox-x
+ece4230\dosbox.exe                                                          = dosbox-staging
+ece4460\dosbox.exe                                                          = dosbox-staging
+GunStick_dosbox\dosbox.exe                                                  = dosbox-staging
+staging0.81.1\dosbox.exe                                                    = dosbox-staging
+staging0.82.0\dosbox.exe                                                    = dosbox-staging
+x\dosbox.exe                                                                = dosbox-x
+x2\dosbox.exe                                                               = dosbox-x
+
+# ── eXoScummVM · eXoDOS · eXoWin3x — ScummVM (Linux flatpak) ───────────────
+flatpak run com.retro_exo.scummvm-2-2-0                                    = scummvm
+flatpak run com.retro_exo.scummvm-2-3-0-git15811-gf97bfb7ce1               = scummvm
+
+# ── eXoScummVM · eXoDOS — ScummVM (Windows .bat) ────────────────────────────
+scummvm\scummvm.exe                                                         = scummvm
+scummvm.exe                                                                 = scummvm
+
+# ── eXoDemoScene — GZDoom (Linux flatpak) ───────────────────────────────────
+# gzdoom is available on macOS via: brew install gzdoom
+flatpak run com.retro_exo.gzdoom-4-11-3                                    = gzdoom
+
+# ── eXoDemoScene — MartyPC ───────────────────────────────────────────────────
+# MartyPC macOS builds: https://github.com/dbalsom/martypc/releases
+martypc.exe                                                                 = martypc
+martypc                                                                     = martypc
+
+# ── eXoAppleIIGS — GSplus / GSport / MAME (Windows) ─────────────────────────
+# GSport is a legacy fork; mapped to gsplus (nearest available macOS emulator).
+# KEGS is the recommended modern Apple IIGS emulator for macOS; requires gsplus
+# or kegs to be installed — the GUI will prefer whichever is detected first.
+GSPlus\gsplus.exe                                                           = gsplus
+GSPort\gsport.exe                                                           = gsplus
+MAME                                                                        = mame
+
+# ── eXoDREAMM — DREAMM ──────────────────────────────────────────────────────
+# DREAMM is cross-platform; macOS build: https://dreamm.aarongiles.com/
+dreamm.exe                                                                  = dreamm
+dreamm                                                                      = dreamm
+
+# ── eXoIF — Interactive Fiction interpreters (Windows) ──────────────────────
+# frotz: brew install frotz  |  gargoyle: https://ccxvii.net/gargoyle/
+frotz.exe                                                                   = frotz
+frotz                                                                       = frotz
+gargoyle.exe                                                                = gargoyle
+gargoyle                                                                    = gargoyle
+
+# ── eXoWin9x — Windows 9x emulation ────────────────────────────────────────
+# No direct macOS native equivalent.  CrossOver (commercial Wine) or a
+# Windows 9x VM (VirtualBox / Parallels) is required.
+wine                                                                        = unavailable

@@ -79,6 +79,7 @@ class ProjectConfig:
     default_emulator: str       # fallback when emulator map has no entry
     detect_marker: str          # relative path to test for auto-detection
     torrent_name: str = ""      # torrent filename in eXo/util/aria/, e.g. "eXoDOS.torrent"
+    gamedata_content_subdir: str = ""  # path to per-game extras ZIPs, e.g. "Content/GameData/eXoDOS"
 
     def xml_path(self, root: str, xml_mode: str = "auto") -> str:
         """Return the absolute path to the XML file for the given mode."""
@@ -137,6 +138,7 @@ EXODOS = ProjectConfig(
     default_emulator="dosbox-staging",
     detect_marker="eXo/eXoDOS",
     torrent_name="eXoDOS.torrent",
+    gamedata_content_subdir="Content/GameData/eXoDOS",
 )
 
 EXOWIN3X = ProjectConfig(

@@ -109,4 +109,4 @@ if [[ "$OSTYPE" == "linux-gnu"* ]] && [[ -z "${PULSE_SERVER:-}" ]]; then
 fi
 
 cd "$SCRIPT_DIR"
-exec "$PYTHON" main.py
+exec "$PYTHON" main.py "$@"

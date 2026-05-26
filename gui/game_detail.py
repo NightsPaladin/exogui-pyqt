@@ -268,7 +268,7 @@ class GameDetailPanel(QWidget):
       - Play / Install buttons
     """
 
-    play_requested      = pyqtSignal(object)    # Game
+    play_requested      = pyqtSignal(object)        # Game
     install_requested   = pyqtSignal(object)    # Game
     uninstall_requested = pyqtSignal(object)    # Game
     cancel_requested    = pyqtSignal()
@@ -403,6 +403,7 @@ class GameDetailPanel(QWidget):
         # Play/Install buttons + phase label
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
+
         self._play_btn = _button("▶  Play")
         self._play_btn.clicked.connect(self._on_play)
         self._install_btn = _button("⬇  Install", "#2e7d32")

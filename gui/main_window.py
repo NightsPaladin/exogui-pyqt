@@ -23,8 +23,11 @@ from core.launcher import Launcher
 from core.image_cache import ImageCache
 from core.project import ProjectConfig, ALL_PROJECTS, get_project
 from core.favorites import FavoritesStore
+import core.native_launch as _native_launch
+from gui.media_pack_dialog import MediaPackImportDialog
 from gui.game_list import GameListPanel
 from gui.game_detail import GameDetailPanel
+from gui.launch_variant_dialog import LaunchVariantDialog
 from gui import themes
 from gui.pin_dialog import (
     has_pin, set_pin, clear_pin,
@@ -126,25 +129,26 @@ class _ProjectRow(QWidget):
         row1.addWidget(browse_btn)
         row1.addWidget(self._remove_btn)
 
-        # ── Row 2: optional ZIP source path ──────────────────────────────────
+        # ── Row 2: optional game source path ─────────────────────────────────
         row2 = QHBoxLayout()
         row2.setSpacing(8)
 
         self._zip_source_edit = QLineEdit(zip_source_path)
         self._zip_source_edit.setPlaceholderText(
-            "Optional: folder containing game ZIPs (local drive or NAS)…"
+            "Optional: collection root or game ZIP folder (local drive or NAS)…"
         )
         self._zip_source_edit.setToolTip(
-            "Lite mode only. Point this to a directory that already contains\n"
-            "the game ZIP files (e.g. an external hard drive or network share).\n"
-            "The GUI will copy from here before trying the torrent."
+            "Lite mode only. Point this to an eXo collection root directory\n"
+            "(e.g. /Volumes/BigDrive/eXoDOS) or directly to a folder of game ZIPs.\n"
+            "When a collection root is given, both game ZIPs and GameData extras\n"
+            "are sourced from it. The GUI copies from here before trying the torrent."
         )
 
         browse_zip_btn = QPushButton("Browse…")
         browse_zip_btn.setFixedWidth(80)
         browse_zip_btn.clicked.connect(self._browse_zip_source)
 
-        row2.addWidget(_sub_label("ZIP Source"))
+        row2.addWidget(_sub_label("Game Source"))
         row2.addWidget(self._zip_source_edit, 1)
         row2.addWidget(browse_zip_btn)
         row2.addWidget(_spacer())
@@ -219,7 +223,7 @@ class _ProjectRow(QWidget):
 
     def _browse_zip_source(self) -> None:
         d = QFileDialog.getExistingDirectory(
-            self, "Select ZIP source folder", self._zip_source_edit.text()
+            self, "Select game source folder", self._zip_source_edit.text()
         )
         if d:
             self._zip_source_edit.setText(d)
@@ -256,6 +260,18 @@ class _ProjectRow(QWidget):
 
 # ── emulator helpers ─────────────────────────────────────────────────────────
 
+def _brew_path() -> str:
+    """Return PATH with Homebrew prefixes prepended (macOS only)."""
+    parts = list(os.environ.get("PATH", "").split(os.pathsep))
+    if sys.platform == "darwin":
+        for prefix in ("/opt/homebrew", "/usr/local"):
+            for sub in ("bin", "sbin"):
+                p = f"{prefix}/{sub}"
+                if os.path.isdir(p) and p not in parts:
+                    parts.insert(0, p)
+    return os.pathsep.join(parts)
+
+
 def _resolve_app_bundle(path: str) -> str:
     """Resolve a macOS .app bundle to its inner executable.
 
@@ -288,16 +304,6 @@ def _resolve_app_bundle(path: str) -> str:
         if candidates:
             return candidates[0]
     return path
-
-
-def _default_emulators() -> list[dict]:
-    """Return macOS starter emulator entries (Linux uses dosbox_linux.txt directly)."""
-    return [
-        {"name": "dosbox-staging", "command": "dosbox-staging"},
-        {"name": "dosbox-x",       "command": "dosbox-x"},
-        {"name": "dosbox-ece",     "command": "dosbox-ece"},
-        {"name": "scummvm",        "command": "scummvm"},
-    ]
 
 
 def _load_emulators_from_settings(settings: QSettings) -> dict[str, str]:
@@ -333,82 +339,101 @@ def _load_emulators_from_settings(settings: QSettings) -> dict[str, str]:
     }
 
 
-# ── per-emulator row widget ───────────────────────────────────────────────────
+# ── per-emulator config row (structured, fixed name) ─────────────────────────
 
-class _EmulatorRow(QWidget):
-    """One row in the Settings > Emulator Commands section.
+class _EmulatorConfigRow(QWidget):
+    """
+    One row in the Settings > Emulators section.
 
-    family name  |  command/path  |  Browse  |  ✕
+    Displays a fixed emulator name and key, an editable command/path field,
+    a Browse button (for .app bundles), and a live status dot.
     """
 
-    def __init__(self, name: str, command: str, parent=None):
+    def __init__(self, spec, command: str = "", parent=None):
         super().__init__(parent)
+        self._spec = spec
 
         layout = QHBoxLayout(self)
-        layout.setContentsMargins(0, 2, 0, 2)
+        layout.setContentsMargins(0, 3, 0, 3)
         layout.setSpacing(8)
 
-        self._name_edit = QLineEdit(name)
-        self._name_edit.setPlaceholderText("name  (e.g. dosbox-staging)")
-        self._name_edit.setFixedWidth(148)
-        self._name_edit.setToolTip(
-            "Short emulator family name — must match names used in\n"
-            "eXo/util/dosbox_macos.txt\n"
-            "(e.g. dosbox-staging, dosbox-x, dosbox-ece, dosbox-074, wine, scummvm)"
+        # Fixed name block
+        name_w = QWidget()
+        name_w.setFixedWidth(148)
+        name_layout = QVBoxLayout(name_w)
+        name_layout.setContentsMargins(0, 0, 0, 0)
+        name_layout.setSpacing(0)
+        disp = QLabel(f"<b>{spec.display_name}</b>")
+        key  = QLabel(f"<span style='color:gray;font-size:10px;'>{spec.name}</span>")
+        name_layout.addWidget(disp)
+        name_layout.addWidget(key)
+
+        # Command / path field
+        hint = (spec.check_commands[0] if spec.check_commands else spec.name)
+        self._cmd = QLineEdit(command)
+        self._cmd.setPlaceholderText(f".app bundle or bare command  (e.g. {hint})")
+        self._cmd.setToolTip(
+            "Path to a .app bundle (e.g. /Applications/DOSBox-Staging.app)\n"
+            "or a bare command name if the emulator is on your PATH\n"
+            "(e.g. dosbox-staging installed via Homebrew)."
         )
+        self._cmd.textChanged.connect(self._refresh_status)
 
-        self._command_edit = QLineEdit(command)
-        self._command_edit.setPlaceholderText(".app bundle or bare command if on PATH…")
-        self._command_edit.setToolTip(
-            "Point to the .app bundle in /Applications, e.g.\n"
-            "  /Applications/DOSBox-Staging.app\n"
-            "The executable inside the bundle is found automatically.\n\n"
-            "Or type a bare command if it is on your PATH, e.g.\n"
-            "  dosbox-staging"
-        )
+        # Browse button — opens dir picker so .app bundles can be selected
+        browse = QPushButton("Browse…")
+        browse.setFixedWidth(80)
+        browse.clicked.connect(self._browse)
 
-        browse_btn = QPushButton("Browse…")
-        browse_btn.setFixedWidth(80)
-        browse_btn.clicked.connect(self._browse)
+        # Status dot
+        self._dot = QLabel("●")
+        self._dot.setFixedWidth(20)
+        self._dot.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._refresh_status()
 
-        self._remove_btn = QPushButton("✕")
-        self._remove_btn.setFixedWidth(28)
-        self._remove_btn.setToolTip("Remove this emulator entry")
+        layout.addWidget(name_w)
+        layout.addWidget(self._cmd, 1)
+        layout.addWidget(browse)
+        layout.addWidget(self._dot)
 
-        layout.addWidget(self._name_edit)
-        layout.addWidget(self._command_edit, 1)
-        layout.addWidget(browse_btn)
-        layout.addWidget(self._remove_btn)
+    def _refresh_status(self) -> None:
+        import shutil as _shutil
+        cmd = self._cmd.text().strip()
+        if not cmd:
+            self._dot.setStyleSheet("color: gray;")
+            self._dot.setToolTip("Not configured")
+            return
+        if os.path.exists(cmd):
+            self._dot.setStyleSheet("color: green;")
+            self._dot.setToolTip("Found")
+        elif _shutil.which(cmd, path=_brew_path()):
+            self._dot.setStyleSheet("color: green;")
+            self._dot.setToolTip(f"Found on PATH: {_shutil.which(cmd, path=_brew_path())}")
+        else:
+            self._dot.setStyleSheet("color: red;")
+            self._dot.setToolTip("Not found — check the path or install the emulator")
 
     def _browse(self) -> None:
-        current = self._command_edit.text().strip()
-        # Start in the bundle's parent dir; default to /Applications on macOS
+        current = self._cmd.text().strip()
         start = (
             os.path.dirname(current) if current and os.path.exists(current)
             else "/Applications" if sys.platform == "darwin"
             else os.path.expanduser("~")
         )
-        # DontUseNativeDialog + ShowDirsOnly lets the user select a .app bundle
-        # (which is a directory) without Qt trying to open it as an application.
         path = QFileDialog.getExistingDirectory(
-            self, "Select .app bundle",
+            self, f"Select {self._spec.display_name}",
             start,
             QFileDialog.Option.ShowDirsOnly | QFileDialog.Option.DontUseNativeDialog,
         )
         if path:
-            self._command_edit.setText(path)
+            self._cmd.setText(path)
 
     @property
     def name(self) -> str:
-        return self._name_edit.text().strip()
+        return self._spec.name
 
     @property
     def command(self) -> str:
-        return self._command_edit.text().strip()
-
-    @property
-    def remove_button(self) -> QPushButton:
-        return self._remove_btn
+        return self._cmd.text().strip()
 
 
 # ── add-project dialog ────────────────────────────────────────────────────────
@@ -495,13 +520,18 @@ class _AddProjectDialog(QDialog):
         zip_row.setContentsMargins(0, 0, 0, 0)
         zip_row.setSpacing(6)
         self._zip_edit = QLineEdit()
-        self._zip_edit.setPlaceholderText("Folder containing game ZIPs (Lite mode)…")
+        self._zip_edit.setPlaceholderText("Collection root or game ZIP folder (Lite mode)…")
+        self._zip_edit.setToolTip(
+            "Point to an eXo collection root (e.g. /Volumes/BigDrive/eXoDOS)\n"
+            "or directly to a folder of game ZIPs.\n"
+            "A collection root also sources GameData extras automatically."
+        )
         browse_zip = QPushButton("Browse…")
         browse_zip.setFixedWidth(80)
         browse_zip.clicked.connect(self._browse_zip)
         zip_row.addWidget(self._zip_edit, 1)
         zip_row.addWidget(browse_zip)
-        opt_form.addRow("ZIP source:", zip_w)
+        opt_form.addRow("Game source:", zip_w)
 
         layout.addLayout(opt_form)
 
@@ -553,7 +583,7 @@ class _AddProjectDialog(QDialog):
     def _browse_zip(self) -> None:
         current = self._zip_edit.text().strip()
         start = current if current and os.path.isdir(current) else os.path.expanduser("~")
-        d = QFileDialog.getExistingDirectory(self, "Select ZIP source folder", start)
+        d = QFileDialog.getExistingDirectory(self, "Select game source folder", start)
         if d:
             self._zip_edit.setText(d)
 
@@ -607,7 +637,6 @@ class SettingsDialog(QDialog):
         self.setMinimumHeight(420)
         self._settings = settings
         self._project_rows: list[_ProjectRow] = []
-        self._emu_rows: list[_EmulatorRow] = []
 
         outer = QVBoxLayout(self)
         outer.setSpacing(14)
@@ -673,26 +702,31 @@ class SettingsDialog(QDialog):
 
         outer.addWidget(projects_box)
 
-        # ── Emulator Commands (macOS only) ────────────────────────────────────
+        # ── Emulators (macOS only) ────────────────────────────────────────────
         # On Linux, dosbox_linux.txt already contains full flatpak commands so
         # no overrides are needed and this section is omitted.
+        self._emu_config_rows: list[_EmulatorConfigRow] = []
         if sys.platform == "darwin":
-            emu_box = QGroupBox("Emulator Commands")
+            from core.emulator_deps import EMULATOR_GROUPS
+
+            emu_box = QGroupBox("Emulators")
             emu_layout = QVBoxLayout(emu_box)
 
-            # Column headers
-            emu_hdr = QHBoxLayout()
-            emu_hdr.setSpacing(8)
-            emu_hdr_name = QLabel("Name")
-            emu_hdr_name.setFixedWidth(148)
-            emu_hdr_name.setStyleSheet("font-weight:bold; color:gray; font-size:11px;")
-            emu_hdr_cmd = QLabel("Command")
-            emu_hdr_cmd.setStyleSheet("font-weight:bold; color:gray; font-size:11px;")
-            emu_hdr.addWidget(emu_hdr_name)
-            emu_hdr.addWidget(emu_hdr_cmd, 1)
-            emu_hdr.addWidget(QLabel(""), 0)    # Browse placeholder
-            emu_hdr.addWidget(QLabel(""))       # Remove placeholder
-            emu_layout.addLayout(emu_hdr)
+            # Top bar: note + "Get Emulators" link
+            top_bar = QHBoxLayout()
+            top_note = QLabel(
+                "<span style='color:gray;font-size:11px;'>"
+                "Point each emulator to its .app bundle or bare command name. "
+                "● = found  ● = not found</span>"
+            )
+            top_note.setWordWrap(True)
+            get_btn = QPushButton("Get Emulators…")
+            get_btn.setToolTip("Show download links for all emulator backends")
+            get_btn.setFixedWidth(130)
+            get_btn.clicked.connect(self._open_get_emulators)
+            top_bar.addWidget(top_note, 1)
+            top_bar.addWidget(get_btn)
+            emu_layout.addLayout(top_bar)
 
             emu_sep = QFrame()
             emu_sep.setFrameShape(QFrame.Shape.HLine)
@@ -701,46 +735,55 @@ class SettingsDialog(QDialog):
             emu_scroll = QScrollArea()
             emu_scroll.setWidgetResizable(True)
             emu_scroll.setFrameShape(QFrame.Shape.NoFrame)
-            emu_scroll.setMinimumHeight(130)
+            emu_scroll.setMinimumHeight(200)
 
-            self._emu_rows_widget = QWidget()
-            self._emu_rows_layout = QVBoxLayout(self._emu_rows_widget)
-            self._emu_rows_layout.setContentsMargins(0, 0, 0, 0)
-            self._emu_rows_layout.setSpacing(2)
-            self._emu_rows_layout.addStretch()
-            emu_scroll.setWidget(self._emu_rows_widget)
-            emu_layout.addWidget(emu_scroll)
+            emu_content = QWidget()
+            emu_content_layout = QVBoxLayout(emu_content)
+            emu_content_layout.setContentsMargins(4, 4, 4, 4)
+            emu_content_layout.setSpacing(6)
 
-            # Load emulator entries (migrate from old individual keys if needed)
+            # Build saved-command lookup from settings
+            saved: dict[str, str] = {}
             raw_emu = settings.value("emulators", None)
             if raw_emu is None:
-                old_staging = settings.value("dosbox_staging", "")
-                old_x       = settings.value("dosbox_x",       "")
-                old_ece     = settings.value("dosbox_ece",     "")
-                old_scumm   = settings.value("scummvm",        "")
-                if any([old_staging, old_x, old_ece, old_scumm]):
-                    emulators = [
-                        {"name": "dosbox-staging", "command": old_staging or "dosbox-staging"},
-                        {"name": "dosbox-x",       "command": old_x       or "dosbox-x"},
-                        {"name": "dosbox-ece",     "command": old_ece     or "dosbox-ece"},
-                        {"name": "scummvm",        "command": old_scumm   or "scummvm"},
-                    ]
-                else:
-                    emulators = _default_emulators()
+                # Migrate from legacy individual keys
+                for old_name, old_key in [
+                    ("dosbox-staging", "dosbox_staging"),
+                    ("dosbox-x",       "dosbox_x"),
+                    ("dosbox-ece",     "dosbox_ece"),
+                    ("scummvm",        "scummvm"),
+                ]:
+                    v = settings.value(old_key, "")
+                    if v:
+                        saved[old_name] = v
             else:
                 try:
-                    emulators = json.loads(raw_emu)
+                    for e in json.loads(raw_emu):
+                        if e.get("name"):
+                            saved[e["name"]] = e.get("command", "")
                 except (json.JSONDecodeError, TypeError):
-                    emulators = _default_emulators()
+                    pass
 
-            for e in emulators:
-                self._add_emu_row(e.get("name", ""), e.get("command", ""))
+            # Render grouped rows
+            for group in EMULATOR_GROUPS:
+                specs = group.specs()
+                if not specs:
+                    continue
+                grp_lbl = QLabel(
+                    f"<span style='color:gray;font-size:11px;'><b>{group.label}</b></span>"
+                )
+                emu_content_layout.addWidget(grp_lbl)
+                for spec in specs:
+                    row = _EmulatorConfigRow(spec, saved.get(spec.name, ""))
+                    emu_content_layout.addWidget(row)
+                    self._emu_config_rows.append(row)
+                grp_div = QFrame()
+                grp_div.setFrameShape(QFrame.Shape.HLine)
+                emu_content_layout.addWidget(grp_div)
 
-            add_emu_btn = QPushButton("＋  Add Emulator")
-            add_emu_btn.setFixedWidth(160)
-            add_emu_btn.clicked.connect(self._add_empty_emu_row)
-            emu_layout.addWidget(add_emu_btn, 0, Qt.AlignmentFlag.AlignLeft)
-
+            emu_content_layout.addStretch()
+            emu_scroll.setWidget(emu_content)
+            emu_layout.addWidget(emu_scroll)
             outer.addWidget(emu_box)
 
         # ── Parental Controls ─────────────────────────────────────────────────
@@ -781,20 +824,10 @@ class SettingsDialog(QDialog):
 
     # ── internal helpers ──────────────────────────────────────────────────────
 
-    def _add_emu_row(self, name: str, command: str) -> None:
-        row = _EmulatorRow(name, command, self)
-        row.remove_button.clicked.connect(lambda: self._remove_emu_row(row))
-        idx = self._emu_rows_layout.count() - 1   # insert before stretch
-        self._emu_rows_layout.insertWidget(idx, row)
-        self._emu_rows.append(row)
-
-    def _remove_emu_row(self, row: _EmulatorRow) -> None:
-        self._emu_rows_layout.removeWidget(row)
-        row.deleteLater()
-        self._emu_rows.remove(row)
-
-    def _add_empty_emu_row(self) -> None:
-        self._add_emu_row("", "")
+    def _open_get_emulators(self) -> None:
+        from gui.emulator_check_dialog import EmulatorCheckDialog
+        dlg = EmulatorCheckDialog(self)
+        dlg.exec()
 
     def _add_row(self, project_id: str, root: str,
                  zip_source_path: str = "", torrent_path: str = "",
@@ -901,7 +934,7 @@ class SettingsDialog(QDialog):
             )
         emulators = [
             {"name": r.name, "command": r.command}
-            for r in self._emu_rows if r.name
+            for r in self._emu_config_rows
         ]
         self._settings.setValue("emulators", json.dumps(emulators))
         # Remove legacy individual keys (migration clean-up)
@@ -948,7 +981,7 @@ class LoadingWidget(QWidget):
         self._sub.setStyleSheet(f"color:{t.text_med}; font-size:13px;")
         self._bar.setStyleSheet(
             f"QProgressBar {{ background:{t.bg_input}; border:1px solid {t.border};"
-            f" border-radius:4px; }}"
+            f" border-radius:4px; color:{t.text_on_accent}; }}"
             f"QProgressBar::chunk {{ background:{t.accent}; border-radius:4px; }}"
         )
 
@@ -1018,6 +1051,7 @@ class MainWindow(QMainWindow):
         self._favorites_store = FavoritesStore(_fav_data)
         self._libraries: dict[str, GameLibrary] = {}
         self._launchers: dict[str, Launcher]    = {}
+        self._setup_already_offered: set[str]   = set()
 
         self.setWindowTitle(f"{APP_NAME} (Qt)")
         self.resize(WINDOW_W, WINDOW_H)
@@ -1170,8 +1204,13 @@ class MainWindow(QMainWindow):
             return
 
         # Offer to extract Content/*.zip if present but not yet unpacked.
+        # _setup_already_offered prevents re-prompting if setup fails (e.g. all
+        # ZIPs are partial downloads); once offered we skip the dialog on retry.
         cfg, root = self._project_entry(self._active_id)
-        if cfg and root and Launcher.needs_content_setup(root, cfg):
+        if (cfg and root
+                and self._active_id not in self._setup_already_offered
+                and Launcher.needs_content_setup(root, cfg)):
+            self._setup_already_offered.add(self._active_id)
             ans = QMessageBox.question(
                 self,
                 f"Set up {cfg.display_name}?",
@@ -1235,6 +1274,7 @@ class MainWindow(QMainWindow):
     def _on_library_load_error(self, msg: str, project_id: str) -> None:
         if project_id != self._active_id:
             return
+        self._ensure_main_skeleton()
         self._show_no_library_ui(project_id, msg)
 
     def _show_no_library_ui(self, project_id: str, msg: str = "") -> None:
@@ -1375,6 +1415,11 @@ class MainWindow(QMainWindow):
                 if old is not None:
                     old.hide()
                     old.setParent(None)   # orphan without deleting
+            # Clear refs to child widgets of the outgoing page so signal
+            # callbacks don't call into deleted C++ objects.
+            for _attr in ("_lite_bar", "_lite_phase_label"):
+                if hasattr(self, _attr):
+                    delattr(self, _attr)
             layout.addWidget(widget)
             widget.show()
         else:
@@ -1387,6 +1432,7 @@ class MainWindow(QMainWindow):
         self._detail_panel._fallback = os.path.join(root, "eXo", "util", "exodos.png")
         self._list_panel.set_library(lib)
         self._list_panel.set_favorites(self._favorites_store.get_set(project_id))
+        self._restore_project_ui_state(project_id)
         total     = len(lib.games)
         installed = len(lib.filter_installed())
         cfg  = get_project(project_id)
@@ -1396,19 +1442,21 @@ class MainWindow(QMainWindow):
 
 
 
-    def _build_main_ui(self) -> None:
-        lib = self._library
-        if lib is None:
-            self._show_no_project_ui()
+    def _ensure_main_skeleton(self) -> None:
+        """Build tab bar + _page_container if not yet built.
+
+        Safe to call multiple times; subsequent calls are no-ops.
+        Separated from _build_main_ui so the skeleton exists even when the
+        first library load fails — otherwise the tab bar never appears.
+        """
+        if hasattr(self, "_page_container"):
             return
-        _, root = self._project_entry(self._active_id)
 
         central = QWidget()
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
 
-        # ── Project tab bar (only shown when > 1 project) ─────────────────
         self._project_tabs = QTabBar()
         self._project_tabs.setExpanding(False)
         for p in self._projects:
@@ -1420,9 +1468,27 @@ class MainWindow(QMainWindow):
         )
         self._project_tabs.setCurrentIndex(active_idx)
         self._project_tabs.currentChanged.connect(self._on_tab_changed)
-
         if len(self._projects) > 1:
             outer.addWidget(self._project_tabs)
+
+        # _page_container holds the swappable content area (splitter,
+        # no-library message, progress panel, etc.).  It sits below the tab
+        # bar so that swapping pages never destroys the tab bar.
+        self._page_container = QWidget()
+        pc_layout = QVBoxLayout(self._page_container)
+        pc_layout.setContentsMargins(0, 0, 0, 0)
+        pc_layout.setSpacing(0)
+        outer.addWidget(self._page_container)
+        self.setCentralWidget(central)
+
+    def _build_main_ui(self) -> None:
+        lib = self._library
+        if lib is None:
+            self._show_no_project_ui()
+            return
+        _, root = self._project_entry(self._active_id)
+
+        self._ensure_main_skeleton()
 
         # ── Splitter with list + detail ───────────────────────────────────
         self._splitter = QSplitter(Qt.Orientation.Horizontal)
@@ -1456,16 +1522,7 @@ class MainWindow(QMainWindow):
             w = self.width() or WINDOW_W
             self._splitter.setSizes([w // 2, w // 2])
 
-        # _page_container holds the swappable content area (splitter, no-library
-        # message, progress panel, etc.).  It sits below the tab bar so that
-        # swapping pages never destroys the tab bar.
-        self._page_container = QWidget()
-        _pc_layout = QVBoxLayout(self._page_container)
-        _pc_layout.setContentsMargins(0, 0, 0, 0)
-        _pc_layout.setSpacing(0)
-        _pc_layout.addWidget(self._splitter)
-        outer.addWidget(self._page_container)
-        self.setCentralWidget(central)
+        self._set_content_page(self._splitter)
 
         if lib:
             total = len(lib.games)
@@ -1474,9 +1531,25 @@ class MainWindow(QMainWindow):
             name = cfg.display_name if cfg else self._active_id
             self._set_status(f"{name}: {total:,} games  ·  {installed:,} installed")
 
-        self._list_panel.select_first()
+        self._restore_project_ui_state(self._active_id)
 
     # ── project switching ─────────────────────────────────────────────────────
+
+    def _save_project_ui_state(self, project_id: str) -> None:
+        if not project_id or not hasattr(self, "_list_panel"):
+            return
+        state = self._list_panel.get_state()
+        self._settings.setValue(f"project_{project_id}/ui_state", json.dumps(state))
+
+    def _restore_project_ui_state(self, project_id: str) -> None:
+        if not hasattr(self, "_list_panel"):
+            return
+        raw = self._settings.value(f"project_{project_id}/ui_state", "{}")
+        try:
+            state = json.loads(raw) if raw else {}
+        except (json.JSONDecodeError, TypeError):
+            state = {}
+        self._list_panel.restore_state(state)
 
     @pyqtSlot(int)
     def _on_tab_changed(self, idx: int) -> None:
@@ -1484,6 +1557,7 @@ class MainWindow(QMainWindow):
             return
         project_id = self._projects[idx]["id"]
         if project_id != self._active_id:
+            self._save_project_ui_state(self._active_id)
             self._switch_project(project_id)
 
     def _switch_project(self, project_id: str) -> None:
@@ -1493,6 +1567,14 @@ class MainWindow(QMainWindow):
         # Use cached library immediately if already loaded
         if project_id in self._libraries:
             self._activate_project(project_id)
+            return
+
+        # If a Lite download is already running for this project, restore the
+        # progress UI rather than re-triggering a library load that will fail.
+        launcher = self._launchers.get(project_id)
+        if launcher and launcher.is_lite_downloading:
+            self._lite_project_id = project_id
+            self._show_lite_progress_ui(project_id)
             return
 
         cfg = get_project(project_id)
@@ -1513,6 +1595,73 @@ class MainWindow(QMainWindow):
         self._loader.loaded.connect(self._loader.deleteLater)
         self._loader.load_error.connect(self._loader.deleteLater)
         self._loader.start()
+
+    def _import_media_pack(self) -> None:
+        """Open the Import Media Pack dialog (Tools menu)."""
+        collections = []
+        for p in self._projects:
+            pid  = p["id"]
+            root = _from_stored_path(p.get("root", ""))
+            cfg  = get_project(pid)
+            if cfg and root and os.path.isdir(root):
+                collections.append((cfg.display_name, pid, root))
+
+        if not collections:
+            QMessageBox.warning(
+                self, "No collections configured",
+                "Configure at least one collection root in Settings before importing a pack.",
+            )
+            return
+
+        # Default to eXoDOS if present, otherwise whatever is first.
+        default_id = next(
+            (pid for _, pid, _ in collections if pid == "exodos"),
+            collections[0][1],
+        )
+        dlg = MediaPackImportDialog(collections, default_id=default_id, parent=self)
+        dlg.exec()
+
+    def _redownload_lite(self) -> None:
+        """Re-download Lite files for the active collection (Tools menu)."""
+        if not self._active_id:
+            QMessageBox.warning(self, "No collection", "No active collection is configured.")
+            return
+        self._start_lite_download(self._active_id)
+
+    def _rebuild_index(self) -> None:
+        """Copy torrent into collection and regenerate index.txt (Tools menu)."""
+        if not self._active_id:
+            QMessageBox.warning(self, "No collection", "No active collection is configured.")
+            return
+        torrent_path = self._torrent_path_for(self._active_id)
+        if not torrent_path or not os.path.isfile(torrent_path):
+            QMessageBox.warning(
+                self, "No torrent configured",
+                "No torrent file found for this collection.\n"
+                "Open Settings and set the Torrent path.",
+            )
+            return
+        cfg, root = self._project_entry(self._active_id)
+        if not root:
+            return
+        aria_dir = os.path.join(root, "eXo", "util", "aria")
+        os.makedirs(aria_dir, exist_ok=True)
+        import shutil as _shutil
+        torrent_fname = os.path.basename(torrent_path)
+        dest_torrent = os.path.join(aria_dir, torrent_fname)
+        if not (os.path.exists(dest_torrent) and os.path.samefile(torrent_path, dest_torrent)):
+            _shutil.copy2(torrent_path, dest_torrent)
+        index_path = os.path.join(aria_dir, "index.txt")
+        try:
+            from core import aria_index as _ai
+            count = _ai.build_index(dest_torrent, index_path)
+            display = cfg.display_name if cfg else self._active_id
+            QMessageBox.information(
+                self, "Index rebuilt",
+                f"Indexed {count:,} files for {display}.\n{index_path}",
+            )
+        except Exception as exc:
+            QMessageBox.critical(self, "Index failed", str(exc))
 
     def _rerun_setup(self) -> None:
         """Re-extract Content archives for the active collection (Tools menu)."""
@@ -1582,6 +1731,11 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        act_reset_filters = QAction("Reset filters", self)
+        act_reset_filters.setShortcut(QKeySequence("Ctrl+Shift+F"))
+        act_reset_filters.triggered.connect(self._reset_filters)
+        view_menu.addAction(act_reset_filters)
+
         act_reset_splitter = QAction("Reset split to 50/50", self)
         act_reset_splitter.triggered.connect(self._reset_splitter)
         view_menu.addAction(act_reset_splitter)
@@ -1599,6 +1753,42 @@ class MainWindow(QMainWindow):
         )
         self._act_setup.triggered.connect(self._rerun_setup)
         tools_menu.addAction(self._act_setup)
+
+        self._act_lite_dl = QAction("Re-download Lite Files…", self)
+        self._act_lite_dl.setToolTip(
+            "Re-download the Lite metadata subset (images, XML database,\n"
+            "launch scripts) for the active collection. Use this to restore\n"
+            "missing Content zips or fetch updated Lite files."
+        )
+        self._act_lite_dl.triggered.connect(self._redownload_lite)
+        tools_menu.addAction(self._act_lite_dl)
+
+        self._act_rebuild_index = QAction("Rebuild Torrent Index…", self)
+        self._act_rebuild_index.setToolTip(
+            "Copy the configured torrent into the collection and regenerate\n"
+            "index.txt so individual game ZIPs can be downloaded on demand."
+        )
+        self._act_rebuild_index.triggered.connect(self._rebuild_index)
+        tools_menu.addAction(self._act_rebuild_index)
+
+        tools_menu.addSeparator()
+        act_import_pack = QAction("Import eXoDOS Media Pack…", self)
+        act_import_pack.setToolTip(
+            "Download and extract a supplemental torrent pack\n"
+            "(e.g. the eXoDOS Media Pack with books, magazines,\n"
+            "soundtracks, and videos) into an existing collection."
+        )
+        act_import_pack.triggered.connect(self._import_media_pack)
+        tools_menu.addAction(act_import_pack)
+
+        tools_menu.addSeparator()
+        act_check_deps = QAction("Check Emulator Dependencies…", self)
+        act_check_deps.setToolTip(
+            "Check which emulator backends are installed and offer\n"
+            "to install any missing ones via Homebrew."
+        )
+        act_check_deps.triggered.connect(self._open_emulator_deps)
+        tools_menu.addAction(act_check_deps)
 
         help_menu = mb.addMenu("Help")
         assert help_menu is not None
@@ -1634,10 +1824,41 @@ class MainWindow(QMainWindow):
 
     @pyqtSlot(object)
     def _on_play_requested(self, game: Game) -> None:
-        if self._launcher:
+        if not self._launcher:
+            return
+        self._detail_panel.stop_audio()   # release audio device before handing off to emulator
+
+        # ── exception.bsh multi-engine / multi-conf variants ──────────────────
+        launch_variants = getattr(game, "launch_variants", [])
+        if len(launch_variants) > 1:
+            dlg = LaunchVariantDialog(game.title, launch_variants, parent=self)
+            if dlg.exec() != LaunchVariantDialog.DialogCode.Accepted:
+                return
+            chosen = launch_variants[dlg.selected_index]
             self._set_status(f"Launching {game.title}…")
-            self._detail_panel.stop_audio()   # release audio device before handing off to emulator
-            self._launcher.launch(game)
+            self._launcher.launch(game, launch_variant=chosen)
+            return
+
+        # ── eXoScummVM multi-platform variants (directory choice) ─────────────
+        cfg, root = self._project_entry(self._active_id)
+        if cfg and root:
+            scummvm_dirs = _native_launch.get_scummvm_variants(cfg, root, game)
+            if len(scummvm_dirs) > 1:
+                from core.game_library import LaunchVariant as _LV
+                platform_variants = [
+                    _LV(label=d, engine="scummvm", scummvm_path=d)
+                    for d in scummvm_dirs
+                ]
+                dlg = LaunchVariantDialog(game.title, platform_variants, parent=self)
+                if dlg.exec() != LaunchVariantDialog.DialogCode.Accepted:
+                    return
+                variant = scummvm_dirs[dlg.selected_index]
+                self._set_status(f"Launching {game.title}…")
+                self._launcher.launch(game, variant=variant)
+                return
+
+        self._set_status(f"Launching {game.title}…")
+        self._launcher.launch(game)
 
     @pyqtSlot(object)
     def _on_install_requested(self, game: Game) -> None:
@@ -1700,7 +1921,11 @@ class MainWindow(QMainWindow):
         game = lib.get_by_id(game_id) if lib else None
         if game:
             game.installed = success
-        self._detail_panel.set_install_done(success, msg)
+        if success and game and lib:
+            lib.refresh_game_extras(game)
+            self._detail_panel.show_game(game)
+        else:
+            self._detail_panel.set_install_done(success, msg)
         if hasattr(self, "_list_panel"):
             self._list_panel.refresh()
         if success:
@@ -1740,7 +1965,11 @@ class MainWindow(QMainWindow):
         if game and success:
             game.installed = True
             game.zip_present = True
-        self._detail_panel.set_install_done(success, msg)
+        if success and game and lib:
+            lib.refresh_game_extras(game)
+            self._detail_panel.show_game(game)
+        else:
+            self._detail_panel.set_install_done(success, msg)
         if hasattr(self, "_list_panel"):
             self._list_panel.refresh()
         if success:
@@ -1804,6 +2033,10 @@ class MainWindow(QMainWindow):
             self._list_panel.apply_theme()
         if hasattr(self, "_detail_panel"):
             self._detail_panel.rebuild_ui()
+
+    def _reset_filters(self) -> None:
+        if hasattr(self, "_list_panel"):
+            self._list_panel.reset_filters()
 
     def _reset_splitter(self) -> None:
         if hasattr(self, "_splitter"):
@@ -1881,6 +2114,11 @@ class MainWindow(QMainWindow):
         self._refresh_loader.load_error.connect(self._refresh_loader.deleteLater)
         self._refresh_loader.start()
 
+    def _open_emulator_deps(self) -> None:
+        from gui.emulator_check_dialog import EmulatorCheckDialog
+        dlg = EmulatorCheckDialog(self)
+        dlg.exec()
+
     def _show_about(self) -> None:
         QMessageBox.about(
             self, f"About {APP_NAME}",
@@ -1895,6 +2133,7 @@ class MainWindow(QMainWindow):
     # ── window lifecycle ──────────────────────────────────────────────────────
 
     def closeEvent(self, a0) -> None:  # noqa: N802
+        self._save_project_ui_state(self._active_id)
         self._settings.setValue("window/geometry", self.saveGeometry())
         if hasattr(self, "_splitter"):
             self._settings.setValue("window/splitter", self._splitter.saveState())
