@@ -8,7 +8,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from typing import Optional
+from typing import Callable, Optional
 
 from PyQt6.QtCore import Qt, QUrl, pyqtSignal
 from PyQt6.QtGui import QPixmap
@@ -77,13 +77,45 @@ def _restyle_button(btn: QPushButton, color: str, fg: str = "#fff") -> None:
     )
 
 
+def _extra_row_style() -> str:
+    t = themes.current()
+    return (
+        f"QWidget {{ background:{t.bg_card}; border-left:2px solid {t.border}; }}"
+        f"QWidget:hover {{ background:{t.bg_input}; border-left:2px solid {t.accent}; }}"
+    )
+
+
+def _accent_button_style(include_disabled: bool = False) -> str:
+    t = themes.current()
+    style = (
+        f"QPushButton {{ background:{t.accent}33; color:{t.accent}; border:1px solid {t.accent}55;"
+        f" border-radius:4px; padding:2px 6px; font-size:11px; }}"
+        f"QPushButton:hover {{ background:{t.accent}; color:#fff; }}"
+    )
+    if include_disabled:
+        style += "QPushButton:disabled { background:#33333366; color:#666; border-color:#444; }"
+    return style
+
+
+class _ClickableLabel(QLabel):
+    """Simple QLabel variant that forwards mouse presses to a supplied callback."""
+
+    def __init__(self, on_click: Callable[[], None], parent=None):
+        super().__init__(parent)
+        self._on_click = on_click
+
+    def mousePressEvent(self, event) -> None:
+        self._on_click()
+        super().mousePressEvent(event)
+
+
 # ── video thumbnail card ──────────────────────────────────────────────────────
 
 class VideoCard(QWidget):
     """
     Small preview card for a video Extra.
     Shows a thumbnail frame (extracted via ffmpeg) plus the title below.
-    Clicking the card opens the video with macOS 'open'.
+    Clicking the card opens the video with the platform default handler.
     """
 
     def __init__(self, extra: Extra, cache: ImageCache, parent=None):
@@ -176,23 +208,17 @@ class ScreenshotCarousel(QWidget):
         layout.addWidget(self._thumb_scroll)
 
         self._paths: list[str] = []
+        self._thumb_labels: list[QLabel] = []
         self._current = 0
 
     def set_screenshots(self, paths: list[str], cache: ImageCache) -> None:
         self._paths = paths
+        self._clear_thumbnails()
         self._current = 0
         self._cache = cache
 
-        # Clear thumbs
-        for i in reversed(range(self._thumb_layout.count())):
-            item = self._thumb_layout.itemAt(i)
-            if item:
-                w = item.widget()
-                if w:
-                    w.deleteLater()
-                    self._thumb_layout.removeItem(item)
-
         if not paths:
+            self._main_label.clear()
             self._main_label.setText("No images available")
             t = themes.current()
             self._main_label.setStyleSheet(
@@ -204,21 +230,34 @@ class ScreenshotCarousel(QWidget):
         self._main_label.setStyleSheet(f"background:{t.bg_window}; border-radius:6px;")
 
         for i, path in enumerate(paths):
-            thumb = QLabel()
+            thumb = _ClickableLabel(lambda n=i: self._show(n))
             thumb.setFixedSize(88, 60)
             thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            thumb.setStyleSheet(
-                f"background:{t.bg_card}; border:2px solid {t.accent if i == 0 else t.border};"
-                "border-radius:4px;"
-            )
             thumb.setCursor(Qt.CursorShape.PointingHandCursor)
-            idx = i  # capture for lambda
-            thumb.mousePressEvent = lambda ev, n=idx: self._show(n)
+            self._apply_thumb_style(thumb, selected=(i == 0))
+            self._thumb_labels.append(thumb)
             self._thumb_layout.insertWidget(i, thumb)
             cache.get(path, callback=lambda _, pm, lbl=thumb: self._set_thumb(lbl, pm),
                       scaled_to=(88, 60))
 
         self._show(0)
+
+    def _clear_thumbnails(self) -> None:
+        while self._thumb_layout.count() > 1:
+            item = self._thumb_layout.takeAt(0)
+            if item is None:
+                break
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._thumb_labels.clear()
+
+    def _apply_thumb_style(self, label: QLabel, *, selected: bool) -> None:
+        t = themes.current()
+        border = t.accent if selected else t.border
+        label.setStyleSheet(
+            f"background:{t.bg_card}; border:2px solid {border}; border-radius:4px;"
+        )
 
     def _set_thumb(self, label: QLabel, pm: QPixmap) -> None:
         if not pm.isNull():
@@ -233,19 +272,8 @@ class ScreenshotCarousel(QWidget):
             callback=lambda _, pm: self._set_main(pm),
             scaled_to=(640, 400),
         )
-        # Update thumbnail borders
-        for i in range(self._thumb_layout.count() - 1):
-            item = self._thumb_layout.itemAt(i)
-            if not item:
-                continue
-            w = item.widget()
-            if w:
-                border = "#4a90d9" if i == idx else "#333"
-                current_style = w.styleSheet()
-                w.setStyleSheet(
-                    current_style.replace("border:2px solid #4a90d9", f"border:2px solid {border}")
-                                 .replace("border:2px solid #333", f"border:2px solid {border}")
-                )
+        for thumb_index, thumb in enumerate(self._thumb_labels):
+            self._apply_thumb_style(thumb, selected=(thumb_index == idx))
 
     def _set_main(self, pm: QPixmap) -> None:
         if not pm.isNull():
@@ -785,10 +813,7 @@ class GameDetailPanel(QWidget):
         t = themes.current()
 
         row = QWidget()
-        row.setStyleSheet(
-            f"QWidget {{ background:{t.bg_card}; border-left:2px solid {t.border}; }}"
-            f"QWidget:hover {{ background:{t.bg_input}; border-left:2px solid {t.accent}; }}"
-        )
+        row.setStyleSheet(_extra_row_style())
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(10, 4, 6, 4)
         row_layout.setSpacing(8)
@@ -800,18 +825,11 @@ class GameDetailPanel(QWidget):
         name_lbl.setWordWrap(False)
         row_layout.addWidget(name_lbl, 1)
 
-        btn_style = (
-            f"QPushButton {{ background:{t.accent}33; color:{t.accent}; border:1px solid {t.accent}55;"
-            f" border-radius:4px; padding:2px 6px; font-size:11px; }}"
-            f"QPushButton:hover {{ background:{t.accent}; color:#fff; }}"
-            f"QPushButton:disabled {{ background:#33333366; color:#666; border-color:#444; }}"
-        )
-
         play_btn = QPushButton("▶")
         play_btn.setFixedWidth(32)
         play_btn.setEnabled(bool(self._player))
         play_btn.setToolTip("Play / Pause")
-        play_btn.setStyleSheet(btn_style)
+        play_btn.setStyleSheet(_accent_button_style(include_disabled=True))
         play_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         path = extra.path
         play_btn.clicked.connect(lambda: self._play_audio(path))
@@ -820,7 +838,7 @@ class GameDetailPanel(QWidget):
         open_btn = QPushButton("Open")
         open_btn.setFixedWidth(54)
         open_btn.setToolTip("Open with system player")
-        open_btn.setStyleSheet(btn_style)
+        open_btn.setStyleSheet(_accent_button_style(include_disabled=True))
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         open_btn.clicked.connect(lambda: _open_path(path))
         row_layout.addWidget(open_btn)
@@ -830,14 +848,11 @@ class GameDetailPanel(QWidget):
     def _make_doc_row(self, extra: Extra) -> QWidget:
         """Full-width row with icon+name on the left and an Open button on the right."""
         icons = {"pdf": "◉", "document": "≡", "audio": "♪", "image": "⬛", "other": "•"}
-        icon  = icons.get(extra.kind, "•")
+        icon = icons.get(extra.kind, "•")
         t = themes.current()
 
         row = QWidget()
-        row.setStyleSheet(
-            f"QWidget {{ background:{t.bg_card}; border-left:2px solid {t.border}; }}"
-            f"QWidget:hover {{ background:{t.bg_input}; border-left:2px solid {t.accent}; }}"
-        )
+        row.setStyleSheet(_extra_row_style())
         row_layout = QHBoxLayout(row)
         row_layout.setContentsMargins(10, 4, 6, 4)
         row_layout.setSpacing(8)
@@ -851,11 +866,7 @@ class GameDetailPanel(QWidget):
 
         open_btn = QPushButton("Open")
         open_btn.setFixedWidth(54)
-        open_btn.setStyleSheet(
-            f"QPushButton {{ background:{t.accent}33; color:{t.accent}; border:1px solid {t.accent}55;"
-            f" border-radius:4px; padding:2px 6px; font-size:11px; }}"
-            f"QPushButton:hover {{ background:{t.accent}; color:#fff; }}"
-        )
+        open_btn.setStyleSheet(_accent_button_style())
         open_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         path = extra.path
         open_btn.clicked.connect(lambda: _open_path(path))

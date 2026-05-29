@@ -84,6 +84,23 @@ def _text(element, tag: str, default: str = "") -> str:
     return default
 
 
+def _iter_text_lines(path: str, *, encoding: str = "utf-8", errors: str = "replace") -> list[str]:
+    """Return text lines from an optional collection file, or ``[]`` on I/O failure."""
+    try:
+        with open(path, "r", encoding=encoding, errors=errors) as fh:
+            return fh.readlines()
+    except OSError:
+        return []
+
+
+def _safe_mtime_token(path: str) -> str:
+    """Return the path mtime as a cache-key token, or ``"0"`` when unreadable."""
+    try:
+        return f"{os.path.getmtime(path):.0f}"
+    except OSError:
+        return "0"
+
+
 _NAME_YEAR_RE = re.compile(r"^(?P<title>.+?)(?: )?\((?P<year>\d{4}|[12]\d{2}x)\)$")
 
 
@@ -297,18 +314,14 @@ _CACHE_BASE    = os.path.join(_APP_DIR, ".cache", "library")
 def _load_macos_emu_map() -> dict[str, str]:
     """Load emulator_macos_map.txt into a {linux/win_cmd: macos_name} dict."""
     result: dict[str, str] = {}
-    try:
-        with open(_MACOS_MAP_PATH, "r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#") or "=" not in stripped:
-                    continue
-                key, _, val = stripped.partition("=")
-                key, val = key.strip(), val.strip()
-                if key and val:
-                    result[key] = val
-    except OSError:
-        pass
+    for line in _iter_text_lines(_MACOS_MAP_PATH):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#") or "=" not in stripped:
+            continue
+        key, _, val = stripped.partition("=")
+        key, val = key.strip(), val.strip()
+        if key and val:
+            result[key] = val
     return result
 
 
@@ -330,17 +343,13 @@ def _load_emu_display_map() -> dict[str, str]:
     The map is cached in memory after the first load.
     """
     result: dict[str, str] = {}
-    try:
-        with open(_EMU_DISPLAY_MAP_PATH, "r", encoding="utf-8") as fh:
-            for line in fh:
-                stripped = line.strip()
-                if not stripped or stripped.startswith("#"):
-                    continue
-                if "=" in stripped:
-                    raw, _, display = stripped.partition("=")
-                    result[raw.strip()] = display.strip()
-    except OSError:
-        pass
+    for line in _iter_text_lines(_EMU_DISPLAY_MAP_PATH):
+        stripped = line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        if "=" in stripped:
+            raw, _, display = stripped.partition("=")
+            result[raw.strip()] = display.strip()
     return result
 
 
@@ -754,10 +763,7 @@ class GameLibrary:
         ]
         parts = [self._config.id, self.xml_mode, str(_CACHE_VERSION), sys.platform]
         for p in paths:
-            try:
-                parts.append(f"{os.path.getmtime(p):.0f}")
-            except OSError:
-                parts.append("0")
+            parts.append(_safe_mtime_token(p))
         return hashlib.md5("|".join(parts).encode()).hexdigest()
 
     def _cache_path(self) -> str:

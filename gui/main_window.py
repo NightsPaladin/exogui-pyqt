@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import sys
 
 from PyQt6.QtCore import Qt, QThread, QTimer, QSettings, QByteArray, pyqtSlot, pyqtSignal
@@ -46,6 +47,24 @@ WINDOW_H     = 800
 # All project/ZIP-source paths are stored relative to this so the app is
 # portable when the entire drive is remounted at a different path.
 _APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+_HINT_TEXT_STYLE = "color: gray; font-size: 11px;"
+_STATUS_DOT_STYLES = {
+    "missing": "color: gray;",
+    "ok": "color: green;",
+    "error": "color: red;",
+}
+
+
+def _read_bool_setting(settings: QSettings, key: str, default: bool = False) -> bool:
+    """Read a QSettings boolean while tolerating older string-backed values."""
+    value = settings.value(key, default)
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    if isinstance(value, str):
+        return value.strip().lower() in {"1", "true", "yes", "on"}
+    return default if value is None else bool(value)
 
 
 def _to_stored_path(path: str) -> str:
@@ -96,7 +115,7 @@ class _ProjectRow(QWidget):
         def _sub_label(text: str) -> QLabel:
             lbl = QLabel(text)
             lbl.setFixedWidth(96)
-            lbl.setStyleSheet("color:gray; font-size:11px;")
+            lbl.setStyleSheet(_HINT_TEXT_STYLE)
             return lbl
 
         def _spacer() -> QWidget:
@@ -181,7 +200,7 @@ class _ProjectRow(QWidget):
         row4.setSpacing(8)
         self._mature_cb = QCheckBox("Include adult/mature titles")
         self._mature_cb.setChecked(show_mature)
-        self._mature_cb.setStyleSheet("color:gray; font-size:11px;")
+        self._mature_cb.setStyleSheet(_HINT_TEXT_STYLE)
         self._mature_cb.setToolTip(
             "When unchecked (default), only family-friendly titles are shown\n"
             "if this collection provides a family-friendly game list.\n"
@@ -364,7 +383,7 @@ class _EmulatorConfigRow(QWidget):
         name_layout.setContentsMargins(0, 0, 0, 0)
         name_layout.setSpacing(0)
         disp = QLabel(f"<b>{spec.display_name}</b>")
-        key  = QLabel(f"<span style='color:gray;font-size:10px;'>{spec.name}</span>")
+        key = QLabel(f"<span style='color:gray;font-size:10px;'>{spec.name}</span>")
         name_layout.addWidget(disp)
         name_layout.addWidget(key)
 
@@ -396,21 +415,24 @@ class _EmulatorConfigRow(QWidget):
         layout.addWidget(self._dot)
 
     def _refresh_status(self) -> None:
-        import shutil as _shutil
         cmd = self._cmd.text().strip()
         if not cmd:
-            self._dot.setStyleSheet("color: gray;")
+            self._dot.setStyleSheet(_STATUS_DOT_STYLES["missing"])
             self._dot.setToolTip("Not configured")
             return
         if os.path.exists(cmd):
-            self._dot.setStyleSheet("color: green;")
+            self._dot.setStyleSheet(_STATUS_DOT_STYLES["ok"])
             self._dot.setToolTip("Found")
-        elif _shutil.which(cmd, path=_brew_path()):
-            self._dot.setStyleSheet("color: green;")
-            self._dot.setToolTip(f"Found on PATH: {_shutil.which(cmd, path=_brew_path())}")
-        else:
-            self._dot.setStyleSheet("color: red;")
-            self._dot.setToolTip("Not found — check the path or install the emulator")
+            return
+
+        which_result = shutil.which(cmd, path=_brew_path())
+        if which_result:
+            self._dot.setStyleSheet(_STATUS_DOT_STYLES["ok"])
+            self._dot.setToolTip(f"Found on PATH: {which_result}")
+            return
+
+        self._dot.setStyleSheet(_STATUS_DOT_STYLES["error"])
+        self._dot.setToolTip("Not found — check the path or install the emulator")
 
     def _browse(self) -> None:
         current = self._cmd.text().strip()
@@ -483,7 +505,7 @@ class _AddProjectDialog(QDialog):
         form.addRow("Folder name:", self._folder_edit)
 
         self._path_label = QLabel()
-        self._path_label.setStyleSheet("color: gray; font-size: 11px;")
+        self._path_label.setStyleSheet(_HINT_TEXT_STYLE)
         self._path_label.setWordWrap(True)
         form.addRow("Full path:", self._path_label)
 
@@ -495,7 +517,7 @@ class _AddProjectDialog(QDialog):
         layout.addWidget(sep)
 
         opt_label = QLabel("Optional — can be configured later in Settings:")
-        opt_label.setStyleSheet("color: gray; font-size: 11px;")
+        opt_label.setStyleSheet(_HINT_TEXT_STYLE)
         layout.addWidget(opt_label)
 
         opt_form = QFormLayout()
@@ -686,7 +708,7 @@ class SettingsDialog(QDialog):
         for p in projects:
             zsp = settings.value(f"project_{p['id']}/zip_source_path", "")
             tp  = settings.value(f"project_{p['id']}/torrent_path", "")
-            mature = settings.value(f"project_{p['id']}/show_mature", False, type=bool)
+            mature = _read_bool_setting(settings, f"project_{p['id']}/show_mature")
             self._add_row(
                 p["id"],
                 _from_stored_path(p.get("root", "")),
@@ -808,9 +830,7 @@ class SettingsDialog(QDialog):
         playback_box = QGroupBox("Playback")
         playback_layout = QVBoxLayout(playback_box)
         self._autoplay_check = QCheckBox("Auto-play music when a game is selected")
-        self._autoplay_check.setChecked(
-            settings.value("music_autoplay", "false").lower() == "true"
-        )
+        self._autoplay_check.setChecked(_read_bool_setting(settings, "music_autoplay"))
         playback_layout.addWidget(self._autoplay_check)
         outer.addWidget(playback_box)
 
@@ -940,10 +960,7 @@ class SettingsDialog(QDialog):
         # Remove legacy individual keys (migration clean-up)
         for _old_key in ("dosbox_staging", "dosbox_x", "dosbox_ece", "scummvm"):
             self._settings.remove(_old_key)
-        self._settings.setValue(
-            "music_autoplay",
-            "true" if self._autoplay_check.isChecked() else "false",
-        )
+        self._settings.setValue("music_autoplay", self._autoplay_check.isChecked())
         self.accept()
 
 
@@ -1113,18 +1130,26 @@ class MainWindow(QMainWindow):
     # ── project helpers ───────────────────────────────────────────────────────
 
     def _project_entry(self, project_id: str) -> tuple[ProjectConfig | None, str]:
-        """Return (ProjectConfig, root) for a project id."""
+        """Return ``(ProjectConfig, root)`` for a project id, or ``(None, "")``."""
         for p in self._projects:
             if p["id"] == project_id:
                 return get_project(project_id), _from_stored_path(p.get("root", ""))
         return None, ""
 
-    def _make_library(self, project_id: str) -> GameLibrary | None:
+    def _require_project_entry(self, project_id: str) -> tuple[ProjectConfig, str] | None:
+        """Return a fully configured project entry, or ``None`` when incomplete."""
         cfg, root = self._project_entry(project_id)
         if not cfg or not root:
             return None
-        show_mature = self._settings.value(
-            f"project_{project_id}/show_mature", False, type=bool
+        return cfg, root
+
+    def _make_library(self, project_id: str) -> GameLibrary | None:
+        entry = self._require_project_entry(project_id)
+        if entry is None:
+            return None
+        cfg, root = entry
+        show_mature = _read_bool_setting(
+            self._settings, f"project_{project_id}/show_mature"
         )
         if show_mature or "family" not in cfg.xml_variants:
             xml_mode = "auto"
@@ -1135,9 +1160,10 @@ class MainWindow(QMainWindow):
         return GameLibrary(root, xml_mode=xml_mode, config=cfg)
 
     def _make_launcher(self, project_id: str) -> Launcher | None:
-        cfg, root = self._project_entry(project_id)
-        if not cfg or not root:
+        entry = self._require_project_entry(project_id)
+        if entry is None:
             return None
+        cfg, root = entry
         zip_source = _from_stored_path(
             self._settings.value(f"project_{project_id}/zip_source_path", "")
         )
@@ -1206,10 +1232,11 @@ class MainWindow(QMainWindow):
         # Offer to extract Content/*.zip if present but not yet unpacked.
         # _setup_already_offered prevents re-prompting if setup fails (e.g. all
         # ZIPs are partial downloads); once offered we skip the dialog on retry.
-        cfg, root = self._project_entry(self._active_id)
-        if (cfg and root
+        entry = self._require_project_entry(self._active_id)
+        if (entry is not None
                 and self._active_id not in self._setup_already_offered
-                and Launcher.needs_content_setup(root, cfg)):
+                and Launcher.needs_content_setup(entry[1], entry[0])):
+            cfg, root = entry
             self._setup_already_offered.add(self._active_id)
             ans = QMessageBox.question(
                 self,
@@ -1264,11 +1291,12 @@ class MainWindow(QMainWindow):
         if project_id != self._active_id:
             return  # user switched away while loading; result is cached for later
 
-        if hasattr(self, "_list_panel"):
+        if getattr(self, "_list_panel", None) is not None:
             self._activate_project(project_id)
-        else:
-            self._loading.set_status(f"Loaded {len(lib.games):,} games.")
-            self._build_main_ui()
+            return
+
+        self._loading.set_status(f"Loaded {len(lib.games):,} games.")
+        self._build_main_ui()
 
     @pyqtSlot(str, str)
     def _on_library_load_error(self, msg: str, project_id: str) -> None:
@@ -1279,7 +1307,8 @@ class MainWindow(QMainWindow):
 
     def _show_no_library_ui(self, project_id: str, msg: str = "") -> None:
         """Show the 'no library' state with options to fix or run a Lite download."""
-        cfg, root = self._project_entry(project_id)
+        entry = self._require_project_entry(project_id)
+        cfg, root = entry if entry is not None else (None, "")
         display = cfg.display_name if cfg else project_id
 
         w = QWidget()
@@ -1404,8 +1433,9 @@ class MainWindow(QMainWindow):
         so the tab bar is preserved.  Before the main UI is built, falls back to
         setCentralWidget so the initial loading/error states still work.
         """
-        if hasattr(self, "_page_container"):
-            layout = self._page_container.layout()
+        page_container = getattr(self, "_page_container", None)
+        if page_container is not None:
+            layout = page_container.layout()
             assert layout is not None
             while layout.count():
                 item = layout.takeAt(0)
@@ -1418,7 +1448,7 @@ class MainWindow(QMainWindow):
             # Clear refs to child widgets of the outgoing page so signal
             # callbacks don't call into deleted C++ objects.
             for _attr in ("_lite_bar", "_lite_phase_label"):
-                if hasattr(self, _attr):
+                if getattr(self, _attr, None) is not None:
                     delattr(self, _attr)
             layout.addWidget(widget)
             widget.show()
@@ -1497,7 +1527,7 @@ class MainWindow(QMainWindow):
         self._list_panel   = GameListPanel(lib, self._cache, root)
         self._detail_panel = GameDetailPanel(self._cache, root)
         self._detail_panel.set_autoplay(
-            self._settings.value("music_autoplay", "false").lower() == "true"
+            _read_bool_setting(self._settings, "music_autoplay")
         )
 
         self._list_panel.game_selected.connect(self._on_game_selected)
@@ -1641,16 +1671,16 @@ class MainWindow(QMainWindow):
                 "Open Settings and set the Torrent path.",
             )
             return
-        cfg, root = self._project_entry(self._active_id)
-        if not root:
+        entry = self._require_project_entry(self._active_id)
+        if entry is None:
             return
+        cfg, root = entry
         aria_dir = os.path.join(root, "eXo", "util", "aria")
         os.makedirs(aria_dir, exist_ok=True)
-        import shutil as _shutil
         torrent_fname = os.path.basename(torrent_path)
         dest_torrent = os.path.join(aria_dir, torrent_fname)
         if not (os.path.exists(dest_torrent) and os.path.samefile(torrent_path, dest_torrent)):
-            _shutil.copy2(torrent_path, dest_torrent)
+            shutil.copy2(torrent_path, dest_torrent)
         index_path = os.path.join(aria_dir, "index.txt")
         try:
             from core import aria_index as _ai
@@ -1817,10 +1847,12 @@ class MainWindow(QMainWindow):
         self._favorites_store.toggle(self._active_id, game_id)
         self._settings.setValue("favorites", json.dumps(self._favorites_store.to_dict()))
         new_favs = self._favorites_store.get_set(self._active_id)
-        if hasattr(self, "_list_panel"):
-            self._list_panel.set_favorites(new_favs)
-        if hasattr(self, "_detail_panel"):
-            self._detail_panel.set_favorite(game_id in new_favs)
+        list_panel = getattr(self, "_list_panel", None)
+        if list_panel is not None:
+            list_panel.set_favorites(new_favs)
+        detail_panel = getattr(self, "_detail_panel", None)
+        if detail_panel is not None:
+            detail_panel.set_favorite(game_id in new_favs)
 
     @pyqtSlot(object)
     def _on_play_requested(self, game: Game) -> None:

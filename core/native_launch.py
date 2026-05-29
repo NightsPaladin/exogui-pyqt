@@ -34,24 +34,40 @@ _MACOS_MAP_PATH = os.path.join(_APP_DIR, "emulator_macos_map.txt")
 _macos_map_cache: Optional[dict] = None
 
 
+def _iter_text_lines(path: str) -> list[str]:
+    """Return text lines from an optional support file, or ``[]`` on I/O failure."""
+    try:
+        with open(path, "r", errors="replace") as fh:
+            return fh.readlines()
+    except OSError:
+        return []
+
+
+def _list_subdirs(path: str) -> list[str]:
+    """Return sorted child directory names, or ``[]`` if the directory is unreadable."""
+    try:
+        return sorted(
+            name for name in os.listdir(path)
+            if os.path.isdir(os.path.join(path, name))
+        )
+    except OSError:
+        return []
+
+
 def _load_emulator_macos_map() -> dict[str, str]:
     """Parse emulator_macos_map.txt and return a {linux/win_cmd: macos_name} dict."""
     global _macos_map_cache
     if _macos_map_cache is not None:
         return _macos_map_cache
     result: dict[str, str] = {}
-    try:
-        with open(_MACOS_MAP_PATH, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, val = line.partition("=")
-                key, val = key.strip(), val.strip()
-                if key and val:
-                    result[key] = val
-    except OSError:
-        pass
+    for raw in _iter_text_lines(_MACOS_MAP_PATH):
+        line = raw.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, val = line.partition("=")
+        key, val = key.strip(), val.strip()
+        if key and val:
+            result[key] = val
     _macos_map_cache = result
     return result
 
@@ -124,13 +140,7 @@ def get_scummvm_variants(config, root: str, game) -> list[str]:
     inner = os.path.join(game_data_dir, gamename)
     if os.path.isdir(inner):
         return []
-    try:
-        subdirs = sorted(
-            d for d in os.listdir(game_data_dir)
-            if os.path.isdir(os.path.join(game_data_dir, d))
-        )
-    except OSError:
-        return []
+    subdirs = _list_subdirs(game_data_dir)
     if len(subdirs) <= 1:
         return []
     windows = [d for d in subdirs if "windows" in d.lower()]
@@ -307,17 +317,13 @@ def _read_dosbox_override(path: str, gamename: str) -> Optional[str]:
     """
     if not os.path.isfile(path):
         return None
-    try:
-        with open(path, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip().rstrip("\r")
-                if not line or line.startswith("#"):
-                    continue
-                parts = line.split(":", 2)
-                if parts[0].lower() == gamename.lower():
-                    return parts[-1]  # last field is always the command
-    except OSError:
-        pass
+    for raw in _iter_text_lines(path):
+        line = raw.strip().rstrip("\r")
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(":", 2)
+        if parts[0].lower() == gamename.lower():
+            return parts[-1]  # last field is always the command
     return None
 
 
@@ -348,12 +354,8 @@ def _resolve_scummvm_data_dir(game_data_dir: str, variant: str = "") -> str:
     if os.path.isdir(inner):
         return inner
 
-    try:
-        subdirs = sorted(
-            d for d in os.listdir(game_data_dir)
-            if os.path.isdir(os.path.join(game_data_dir, d))
-        )
-    except OSError:
+    subdirs = _list_subdirs(game_data_dir)
+    if not subdirs and not os.path.isdir(game_data_dir):
         return game_data_dir
 
     if not subdirs:
@@ -410,17 +412,13 @@ def _parse_scummvm_txt(path: str, gamename: str) -> Optional[str]:
     """
     if not os.path.isfile(path):
         return None
-    try:
-        with open(path, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip().rstrip("\r")
-                if not line:
-                    continue
-                parts = line.split(";")
-                if len(parts) >= 2 and parts[0].lower() == gamename.lower():
-                    return parts[1]
-    except OSError:
-        pass
+    for raw in _iter_text_lines(path):
+        line = raw.strip().rstrip("\r")
+        if not line:
+            continue
+        parts = line.split(";")
+        if len(parts) >= 2 and parts[0].lower() == gamename.lower():
+            return parts[1]
     return None
 
 
@@ -485,17 +483,13 @@ def _parse_iigs_txt(path: str, gamename: str) -> Optional[str]:
     """
     if not os.path.isfile(path):
         return None
-    try:
-        with open(path, "r", errors="replace") as fh:
-            for raw in fh:
-                line = raw.strip().rstrip("\r")
-                if not line:
-                    continue
-                idx = line.find(":")
-                if idx >= 0 and line[:idx].lower() == gamename.lower():
-                    return line[idx + 1:]
-    except OSError:
-        pass
+    for raw in _iter_text_lines(path):
+        line = raw.strip().rstrip("\r")
+        if not line:
+            continue
+        idx = line.find(":")
+        if idx >= 0 and line[:idx].lower() == gamename.lower():
+            return line[idx + 1:]
     return None
 
 

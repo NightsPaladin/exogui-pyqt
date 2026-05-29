@@ -7,15 +7,29 @@ Usage:
 
 The collection root defaults to the parent directory of this script's
 directory, i.e. the mounted eXo volume root.
+
+One deliberate platform-specific workaround lives here: when the GUI is run as
+plain ``python3 main.py`` instead of from a packaged app bundle, Qt alone
+cannot consistently rename the app/process from "python3" to "eXoGUI" across
+macOS and Linux.  The title/process-name helpers below are kept together and
+documented so that workaround remains explicit rather than feeling accidental.
 """
 
 import os
 import sys
 
 
+def _consume_flag(argv: list[str], *flags: str) -> tuple[list[str], bool]:
+    """Return ``(argv_without_flags, found)`` for command-line flags we handle."""
+    matched = {flag for flag in flags if flag in argv}
+    if not matched:
+        return argv, False
+    return [arg for arg in argv if arg not in matched], True
+
+
 def _set_app_process_name(name: str) -> None:
     """
-    Set a friendly process/app name so the app appears as 'eXoDOS' rather
+    Set a friendly process/app name so the app appears as 'eXoGUI' rather
     than 'python3.x' in CMD+TAB (macOS), the taskbar, or process listings.
 
     macOS: sets CFBundleName via PyObjC, falls back to ctypes setprogname.
@@ -141,15 +155,13 @@ def _setup_linux_audio() -> None:
 def main() -> None:
     # Enable debug logging if --debug is on the command line (strip it before
     # passing argv to QApplication so Qt doesn't emit unknown-option warnings).
-    if "--debug" in sys.argv or "-debug" in sys.argv:
-        sys.argv = [a for a in sys.argv if a not in ("--debug", "-debug")]
+    sys.argv, debug_enabled = _consume_flag(sys.argv, "--debug", "-debug")
+    if debug_enabled:
         import core.debug as _debug_mod
         _debug_mod.DEBUG = True
         print("[DEBUG] Debug logging enabled", file=sys.stderr)
 
-    _reset_pin = "--reset-pin" in sys.argv
-    if _reset_pin:
-        sys.argv = [a for a in sys.argv if a != "--reset-pin"]
+    sys.argv, _reset_pin = _consume_flag(sys.argv, "--reset-pin")
 
     root = find_project_root(sys.argv)
 
@@ -179,7 +191,9 @@ def main() -> None:
     app.setApplicationVersion(APP_VERSION)
     app.setWindowIcon(make_app_icon())
 
-    # Set process name now that NSApplication is initialised
+    # Keep the process/menu title workaround explicit: this is the one
+    # intentional platform hack in the app, needed for plain-script launches.
+    # Set process name now that NSApplication is initialised.
     _set_app_process_name(APP_NAME)
 
     # On macOS: rename the first menu bar item after the event loop starts.
